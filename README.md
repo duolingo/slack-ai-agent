@@ -99,3 +99,5 @@ Tests use [Jest](https://jestjs.io/) with `ts-jest`. Test files live next to the
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
+
+Duolingo is hiring! Apply at https://www.duolingo.com/careers
