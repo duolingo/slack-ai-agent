@@ -1,0 +1,44 @@
+{
+  "name": "slack-ai-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "prod": "node dist/src/index.js",
+    "test": "jest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.2.2",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.37",
+    "@anthropic-ai/sdk": "^0.72.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@slack/bolt": "^4.6.0",
+    "@types/node-fetch": "^2.6.13",
+    "axios": "^1.13.6",
+    "dotenv": "^17.2.4",
+    "js-yaml": "^4.1.1",
+    "jsonrepair": "^3.13.2",
+    "node-fetch": "^3.3.2",
+    "zod": "^4.3.6"
+  },
+  "overrides": {
+    "fast-xml-parser": "^5.3.4"
+  }
+}

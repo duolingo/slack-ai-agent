@@ -1,0 +1,40 @@
+# Channel routing configuration.
+#
+# Copy this file to channels.yaml and customize for your workspace.
+#
+# - contextSources: map channel name patterns to instruction files in config/instructions/
+# - conditionalReplyChannels: control which channels the bot auto-replies in
+# - ephemeralChannelConfig: route private summaries to designated channels/users
+# - dmNotificationConfig: send DM notifications when the bot replies in specific channels
+
+contextSources:
+  - channelNamePattern: "^help-engineering$"
+    file: example-channel.txt
+  - channelNamePattern: "^help-devops$"
+    file: example-channel.txt
+
+conditionalReplyChannels:
+  # Channels that respond to all messages (no requiredKeywords = match all)
+  - channelNamePattern: "^(my-bot-test|help-engineering)$"
+  - channelNamePattern: "^help-devops$"
+
+  # Channels that respond only when specific keywords are present
+  - channelNamePattern: "^alerts-.*$"
+    requiredKeywords:
+      - "Urgency: High"
+      - "Service: "
+    allowBotMessages: true # alerts come from monitoring bots
+
+  # Channels that respond to specific Slack workflow submissions
+  # - channelNamePattern: "^help-requests$"
+  #   allowBotMessages: true
+  #   allowedWorkflowIds: ["Wf0EXAMPLE01"]
+
+ephemeralChannelConfig:
+  # C0EXAMPLE01: # Channel: help-engineering
+  #   - C0EXAMPLE02 # Channel: priv-engineering-bot-answers
+  #   - U0EXAMPLE01 # User: team-lead
+
+dmNotificationConfig:
+  # C0EXAMPLE01: # Channel: help-engineering
+  #   - U0EXAMPLE01 # User: team-lead

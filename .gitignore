@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.js
+!jest.config.js
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# json files
+*.json
+mcp-servers.json*
+!mcp-servers.example.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Internal config (non-example files)
+config/*
+!config/example-*.yaml
+config/instructions/*
+!config/instructions/example-*.txt
+config/approvable-actions/*
+!config/approvable-actions/example-*.ts
+config/subagents/*.yaml
+!config/subagents/example-*.yaml
+
+# Employee data (PII)
+data/*
+!data/example-*.yaml
+
+# Logs
+*.log
+logs/
+
+# Misc file types
+README_INTERNAL.md
+blog-post-*.md
+*.csv
+scripts/*
+
+# IDE & editor
+.claude/
+.cursor/
+.vscode/
+.idea/
+*.un~
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# Misc
+.node-version

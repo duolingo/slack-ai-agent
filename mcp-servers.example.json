@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/username/Code/"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "your-github-token"
+      }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "postgresql://user:password@localhost:5432/dbname"
+      }
+    },
+    "web-search": {
+      "type": "sse",
+      "url": "http://localhost:3001/sse",
+      "headers": {
+        "Authorization": "Bearer your-api-key"
+      }
+    }
+  }
+}

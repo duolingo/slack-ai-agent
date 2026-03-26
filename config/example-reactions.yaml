@@ -1,0 +1,15 @@
+# Reaction emoji configuration.
+# All values are Slack emoji names (without colons).
+# Copy this file to reactions.yaml and customize.
+
+# Bot lifecycle reactions (shown on the user's original message)
+THINKING: thinking_face
+TOOL_USE: gear
+COMPLETE: white_check_mark
+SKIPPED: no_entry_sign
+ERROR: x
+
+# Suppression emoji names — messages containing :<name>: are skipped.
+SUPPRESSION_EMOJIS:
+  - shushing_face
+  - shhh

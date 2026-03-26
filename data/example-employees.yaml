@@ -1,0 +1,26 @@
+# Employee directory — keyed by Slack user ID
+# Real data lives in data/employees.yaml (git-ignored, synced externally).
+# Copy this file to employees.yaml and fill in real values for local dev.
+#
+# role: must match a key in config/tool-allowlist.yaml (e.g. member, engineer, privilegedEngineer)
+# Employees without a role field are locked out (treated as "none").
+
+U0123ABCDEF:
+  email: "jane.doe@example.com"
+  firstName: "Jane"
+  lastName: "Doe"
+  github: "janedoe"
+  role: "privilegedEngineer"
+
+U9876ZYXWVU:
+  email: "john.smith@example.com"
+  firstName: "John"
+  lastName: "Smith"
+  github: "johnsmith"
+  role: "engineer"
+
+UABCD123456:
+  email: "carol.jones@example.com"
+  firstName: "Carol"
+  lastName: "Jones"
+  role: "member"
