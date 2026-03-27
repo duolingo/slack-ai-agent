@@ -1,5 +1,5 @@
 /**
- * Shared constants across the Slack bot application
+ * Shared constants across the Slack app
  */
 
 export const DEFAULT_EMAIL =

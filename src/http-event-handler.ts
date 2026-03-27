@@ -52,8 +52,8 @@ export class HttpEventHandler implements EventHandler {
       slack_channel_name: params.slackChannelName,
       slack_thread_ts: params.slackThreadTs,
       slack_message_link: params.slackMessageLink,
-      slack_bot_question_length: params.slackBotQuestion.length,
-      slack_bot_answer_length: params.slackBotAnswer.length,
+      slack_bot_question_length: params.slackAppQuestion.length,
+      slack_bot_answer_length: params.slackAppAnswer.length,
       slack_bot_tool_calls: params.toolCalls || undefined,
       slack_bot_tool_calls_count: params.toolCalls
         ? params.toolCalls.length
@@ -68,11 +68,11 @@ export class HttpEventHandler implements EventHandler {
 
     if (includeContent) {
       properties.slack_bot_question = truncateText(
-        params.slackBotQuestion,
+        params.slackAppQuestion,
         TRACKING_FIELD_MAX_LENGTH,
       );
       properties.slack_bot_answer = truncateText(
-        params.slackBotAnswer,
+        params.slackAppAnswer,
         TRACKING_FIELD_MAX_LENGTH,
       );
     }

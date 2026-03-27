@@ -93,11 +93,11 @@ export class ConsoleEventHandler implements EventHandler {
       JSON.stringify(
         {
           question: truncateText(
-            params.slackBotQuestion,
+            params.slackAppQuestion,
             TRACKING_FIELD_MAX_LENGTH,
           ),
           answer: truncateText(
-            params.slackBotAnswer,
+            params.slackAppAnswer,
             TRACKING_FIELD_MAX_LENGTH,
           ),
           messageLink: params.slackMessageLink,
@@ -115,16 +115,16 @@ export class ConsoleEventHandler implements EventHandler {
       user: params.slackUsername,
     });
 
-    if (params.slackBotQuestion || params.slackBotAnswer) {
+    if (params.slackAppQuestion || params.slackAppAnswer) {
       logger.debug(
         "Message feedback - Question/Answer content:",
         JSON.stringify(
           {
-            question: params.slackBotQuestion
-              ? truncateText(params.slackBotQuestion, TRACKING_FIELD_MAX_LENGTH)
+            question: params.slackAppQuestion
+              ? truncateText(params.slackAppQuestion, TRACKING_FIELD_MAX_LENGTH)
               : undefined,
-            answer: params.slackBotAnswer
-              ? truncateText(params.slackBotAnswer, TRACKING_FIELD_MAX_LENGTH)
+            answer: params.slackAppAnswer
+              ? truncateText(params.slackAppAnswer, TRACKING_FIELD_MAX_LENGTH)
               : undefined,
             messageLink: params.slackMessageLink,
             username: params.slackUsername,

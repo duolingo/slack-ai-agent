@@ -1,6 +1,6 @@
 # Slack AI Agent
 
-A Slack bot powered by Claude Code SDK. Responds in DMs, channels, and @-mentions with streaming responses, thread context, file uploads, and extensible MCP tool integrations.
+A Slack app powered by Claude Code SDK. Responds in DMs, channels, and @-mentions with streaming responses, thread context, file uploads, and extensible MCP tool integrations.
 
 ## Architecture
 

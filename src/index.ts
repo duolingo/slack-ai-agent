@@ -16,7 +16,7 @@ const logger = new Logger("Main");
 
 async function start() {
   try {
-    logger.info("Starting Claude Code Slack bot", {
+    logger.info("Starting Claude Code Slack app", {
       debug: config.debug,
     });
 
@@ -86,7 +86,7 @@ async function start() {
     await app.start();
     UserUtils.startCleanupInterval();
 
-    logger.info("⚡️ Claude Code Slack bot is running!", {});
+    logger.info("⚡️ Claude Code Slack app is running!", {});
     logger.info("Configuration:", {
       debugMode: config.debug,
       baseDirectory: config.baseDirectory,

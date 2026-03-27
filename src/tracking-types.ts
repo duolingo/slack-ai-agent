@@ -7,8 +7,8 @@ export interface MessageProcessedEvent {
   slackChannelName?: string;
   slackThreadTs?: string;
   slackMessageLink: string;
-  slackBotQuestion: string;
-  slackBotAnswer: string;
+  slackAppQuestion: string;
+  slackAppAnswer: string;
   latencyMs: number;
   toolCalls?: string[];
   inputTokens?: number;
@@ -27,8 +27,8 @@ export interface FeedbackEvent {
   slackMessageLink: string;
   upvoteStatus: "upvote" | "downvote" | "ok" | "delete";
   upvoteTargetType: string;
-  slackBotQuestion?: string;
-  slackBotAnswer?: string;
+  slackAppQuestion?: string;
+  slackAppAnswer?: string;
 }
 
 // ─── EventHandler interface ─────────────────────────────────────────────────

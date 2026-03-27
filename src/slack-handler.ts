@@ -1428,8 +1428,8 @@ export class SlackHandler {
           slackChannelName: channelName,
           slackThreadTs: event.thread_ts,
           slackMessageLink,
-          slackBotQuestion: event.text || "",
-          slackBotAnswer: consolidatedMessage,
+          slackAppQuestion: event.text || "",
+          slackAppAnswer: consolidatedMessage,
           latencyMs,
           toolCalls: result.toolCalls,
           inputTokens: result.tokenUsage?.inputTokens,
@@ -1868,8 +1868,8 @@ export class SlackHandler {
               slackMessageLink,
               upvoteStatus: "delete",
               upvoteTargetType: "slack_ai_bot",
-              slackBotQuestion: parsed?.question,
-              slackBotAnswer: parsed?.answer,
+              slackAppQuestion: parsed?.question,
+              slackAppAnswer: parsed?.answer,
             });
           } catch (trackingError) {
             this.logger.warn("Failed to track delete feedback", trackingError);
@@ -2081,8 +2081,8 @@ export class SlackHandler {
           slackMessageLink,
           upvoteStatus,
           upvoteTargetType: "slack_ai_bot",
-          slackBotQuestion: parsed?.question,
-          slackBotAnswer: parsed?.answer,
+          slackAppQuestion: parsed?.question,
+          slackAppAnswer: parsed?.answer,
         });
         this.logger.info(
           `🗳️ ${label} vote by ${await UserUtils.getUsername(this.app, userId)}`,
