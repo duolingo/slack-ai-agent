@@ -73,6 +73,7 @@ export const config = {
     model: "claude-opus-4-6", // Claude 4.6 Opus - most capable model
   },
   slackWorkspaceUrl: getRequiredEnv("SLACK_WORKSPACE_URL"),
+  trackingClientId: process.env.TRACKING_CLIENT_ID || "slack-ai-agent",
   baseDirectory: ensureBaseDirectory(),
   debug: process.env.DEBUG === "true" || process.env.NODE_ENV === "development",
 };

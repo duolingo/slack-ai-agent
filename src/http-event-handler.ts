@@ -1,4 +1,5 @@
 import axios from "axios";
+import { config } from "./config";
 import { Logger } from "./logger";
 import { TRACKING_FIELD_MAX_LENGTH } from "./constants";
 import {
@@ -79,7 +80,7 @@ export class HttpEventHandler implements EventHandler {
 
     const payload: TrackingPayload = {
       attributes: { distinct_id: 0, ...properties },
-      client: { client_id: "slack-ai-agent" },
+      client: { client_id: config.trackingClientId },
       event_timestamp: Date.now(),
       event_type: "slack_ai_bot_message_processed",
     };
@@ -103,7 +104,7 @@ export class HttpEventHandler implements EventHandler {
 
     const payload: TrackingPayload = {
       attributes: { distinct_id: 0, ...properties },
-      client: { client_id: "slack-ai-agent" },
+      client: { client_id: config.trackingClientId },
       event_timestamp: Date.now(),
       event_type: "slack_ai_bot_message_feedback",
     };
