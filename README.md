@@ -17,7 +17,7 @@ A Slack app powered by Claude Code SDK. Responds in DMs, channels, and @-mention
 ### 1. Install
 
 ```bash
-git clone <your-repo>
+git clone https://github.com/duolingo/slack-ai-agent.git
 npm install
 ```
 
