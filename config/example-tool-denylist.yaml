@@ -1,0 +1,27 @@
+# Tools the bot must never use.
+# Copy this file to tool-denylist.yaml and customize.
+#
+# Write-oriented GitHub MCP tools are blocked because the bot is read-only;
+# PR creation/modification should go through approvable actions instead.
+# git clone / git checkout are blocked to prevent the agent from cloning repos.
+
+disallowed_tools:
+  # GitHub write operations
+  - mcp__github__create_or_update_file
+  - mcp__github__create_pull_request
+  - mcp__github__delete_file
+  - mcp__github__push_files
+  - mcp__github__merge_pull_request
+  - mcp__github__update_pull_request
+  - mcp__github__fork_repository
+  - mcp__github__create_repository
+  - mcp__github__create_branch
+
+  # Slack write operations (bot posts via its own framework, not MCP)
+  - mcp__slack__slack_post_message
+  - mcp__slack__slack_reply_to_thread
+  - mcp__slack__slack_add_reaction
+
+  # Git operations that write to the filesystem
+  - "Bash(git clone:*)"
+  - "Bash(git checkout:*)"

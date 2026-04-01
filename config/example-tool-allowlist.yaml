@@ -1,0 +1,69 @@
+# Tool allowlist — role-based access control.
+#
+# Copy this file to tool-allowlist.yaml and customize for your MCP servers.
+#
+# IMPORTANT: Roles must be listed from LEAST to MOST privileged.
+# Each role inherits all tools from the roles listed above it.
+# The key order defines the role hierarchy — do not reorder casually.
+#
+# To add a new role: insert a new key at the appropriate privilege level
+# and assign it to users via the `role` field in data/employees.yaml.
+
+# Tools available to all members (lowest privilege)
+member:
+  # Claude SDK native tools
+  - BashOutput
+  - ExitPlanMode
+  - Glob
+  - Grep
+  - ListMcpResources
+  - Read
+  - ReadMcpResource
+  - Skill
+  - Task
+  - TodoWrite
+  - WebFetch
+  - WebSearch
+  - Write
+
+  # Bash commands (read-only)
+  - "Bash(date:*)"
+  - "Bash(echo:*)"
+  - "Bash(cat:*)"
+  - "Bash(ls:*)"
+  - "Bash(grep:*)"
+  - "Bash(head:*)"
+  - "Bash(tail:*)"
+  - "Bash(jq:*)"
+  - "Bash(find:*)"
+  - "Bash(rg:*)"
+
+  # Example MCP server tools (uncomment and adjust for your setup)
+  # - mcp__slack__slack_list_channels
+  # - mcp__slack__slack_search_messages
+  # - mcp__slack__slack_get_channel_history
+  # - mcp__slack__slack_get_thread_replies
+  # - mcp__github__get_file_contents
+  # - mcp__github__list_commits
+  # - mcp__github__list_pull_requests
+  # - mcp__github__pull_request_read
+  # - mcp__github__search_code
+
+# Additional tools available to engineers
+engineer:
+  # Example: CI/CD tools
+  # - mcp__jenkins__get_build_info
+  # - mcp__jenkins__get_build_logs
+
+  # Example: Monitoring tools
+  # - mcp__grafana__search_dashboards
+  # - mcp__sentry__get_issue_details
+  # - mcp__sentry__search_issues
+
+  # Example: Full AWS CLI access
+  # - "Bash(aws:*)"
+
+# Tools restricted to privileged engineers only
+privilegedEngineer:
+  # Example: BigQuery CLI access
+  # - "Bash(bq:*)"
