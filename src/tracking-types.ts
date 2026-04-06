@@ -1,9 +1,12 @@
+import { SlackChannelType } from "./types";
+
 // ─── Event types ────────────────────────────────────────────────────────────
 
 export interface MessageProcessedEvent {
   slackUsername: string;
   slackHandle?: string | null;
   slackChannel: string;
+  slackChannelType: SlackChannelType;
   slackChannelName?: string;
   slackThreadTs?: string;
   slackMessageLink: string;
@@ -22,6 +25,7 @@ export interface FeedbackEvent {
   slackUsername: string;
   slackHandle?: string | null;
   slackChannel: string;
+  slackChannelType: SlackChannelType;
   slackChannelName?: string;
   slackThreadTs?: string;
   slackMessageLink: string;

@@ -427,6 +427,35 @@ describe("SlackHandler", () => {
       expect(parse({ value: '"just a string"' })).toBeNull();
       expect(parse({ value: "42" })).toBeNull();
     });
+
+    it("preserves channel_type in parsed payload", () => {
+      const result = parse({
+        value: JSON.stringify({
+          channel: "D1",
+          channel_type: "im",
+          root_ts: "1.1",
+        }),
+      });
+      expect(result).toEqual({
+        channel: "D1",
+        channel_type: "im",
+        root_ts: "1.1",
+      });
+    });
+  });
+
+  describe("createVotingButtonsBlock", () => {
+    it("includes channel_type in button payload", () => {
+      const block = priv(handler).createVotingButtonsBlock({
+        channel: "D1",
+        channel_type: "im",
+        root_ts: "1.1",
+        question: "q",
+        answer: "a",
+      });
+      const parsed = JSON.parse(block.elements[0].value);
+      expect(parsed.channel_type).toBe("im");
+    });
   });
 
   describe("isMentionAtNaturalStart", () => {
@@ -824,6 +853,15 @@ describe("SlackHandler", () => {
       const event = makeEvent({ text: "hello", channel_type: "im" });
       await priv(handler).prepareEventForHandling(event);
       expect(t.channelConfig.getChannelName).not.toHaveBeenCalled();
+    });
+
+    it("passes channel_type to getChannelName for non-DM channels", async () => {
+      const event = makeEvent({ text: "hello", channel_type: "channel" });
+      await priv(handler).prepareEventForHandling(event);
+      expect(t.channelConfig.getChannelName).toHaveBeenCalledWith(
+        "C456",
+        "channel",
+      );
     });
 
     it("returns shouldHandle=false when channelConfig says no", async () => {
