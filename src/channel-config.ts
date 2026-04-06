@@ -183,10 +183,11 @@ export class ChannelConfigManager {
   async lookupChannelType(channelId: string): Promise<SlackChannelType> {
     if (!this.app) {
       this.logger.warn(
-        "Slack App not set, cannot look up channel type — defaulting to channel",
+        "Slack App not set, cannot look up channel type — defaulting to im (most restrictive)",
         { channelId },
       );
-      return "channel";
+      // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+      return "im";
     }
 
     try {
@@ -200,13 +201,14 @@ export class ChannelConfigManager {
       return "channel";
     } catch (error) {
       this.logger.warn(
-        "Failed to look up channel type — defaulting to channel",
+        "Failed to look up channel type — defaulting to im (most restrictive)",
         {
           channelId,
           error,
         },
       );
-      return "channel";
+      // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+      return "im";
     }
   }
 

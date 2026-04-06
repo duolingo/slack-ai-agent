@@ -1895,7 +1895,8 @@ export class SlackHandler {
           const action = body?.actions?.[0];
           const parsed = this.parseVotePayload(action);
           const channel = parsed?.channel || body?.container?.channel_id;
-          const channelType = parsed?.channel_type || "channel";
+          // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+          const channelType = parsed?.channel_type || "im";
           const ts = body?.container?.message_ts;
           const userId = body?.user?.id;
 
