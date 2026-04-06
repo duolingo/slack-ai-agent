@@ -152,6 +152,7 @@ export class MessageProcessor {
           slackContext &&
           (await this.channelConfig.isConditionalReplyChannel(
             slackContext.channel,
+            slackContext.channelType,
           ))
         ) {
           if (content.match(/DO_NOT_RESPOND/i)) {
@@ -188,6 +189,7 @@ export class MessageProcessor {
           slackContext &&
           (await this.channelConfig.isConditionalReplyChannel(
             slackContext.channel,
+            slackContext.channelType,
           ))
         ) {
           if (resultText.match(/DO_NOT_RESPOND/i)) {

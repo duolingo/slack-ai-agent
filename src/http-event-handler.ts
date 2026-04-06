@@ -1,5 +1,6 @@
 import axios from "axios";
 import { config } from "./config";
+import { SlackChannelType } from "./types";
 import { Logger } from "./logger";
 import { TRACKING_FIELD_MAX_LENGTH } from "./constants";
 import {
@@ -38,13 +39,19 @@ export class HttpEventHandler implements EventHandler {
   constructor(
     private base: EventHandler,
     private endpointUrl: string,
-    private checkContentLogging: (channelId: string) => Promise<boolean>,
+    private checkContentLogging: (
+      channelId: string,
+      channelType: SlackChannelType,
+    ) => Promise<boolean>,
   ) {}
 
   async onMessageProcessed(params: MessageProcessedEvent): Promise<void> {
     await this.base.onMessageProcessed(params);
 
-    const includeContent = await this.checkContentLogging(params.slackChannel);
+    const includeContent = await this.checkContentLogging(
+      params.slackChannel,
+      params.slackChannelType,
+    );
 
     const properties: Properties = {
       slack_username: params.slackUsername,

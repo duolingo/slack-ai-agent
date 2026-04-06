@@ -7,7 +7,12 @@ import { config } from "./config";
 import { ChannelConfigManager } from "./channel-config";
 import { ReactionManager, REACTIONS } from "./reaction-manager";
 import { MessageProcessor } from "./message-processor";
-import { MessageEvent, SlackContext, ConversationSession } from "./types";
+import {
+  MessageEvent,
+  SlackChannelType,
+  SlackContext,
+  ConversationSession,
+} from "./types";
 import {
   trackMessageProcessed,
   trackMessageFeedback,
@@ -217,6 +222,7 @@ export class SlackHandler {
    */
   async sendMessage(
     channelId: string,
+    channelType: SlackChannelType,
     messageOptions: any,
     fallbackSay?: any,
     isBotMentioned?: boolean,
@@ -456,8 +462,10 @@ export class SlackHandler {
 
                 if (dmChannel.ok && dmChannel.channel?.id) {
                   // Get channel name for context (uses cached lookup)
-                  const resolvedName =
-                    await this.channelConfig.getChannelName(channelId);
+                  const resolvedName = await this.channelConfig.getChannelName(
+                    channelId,
+                    channelType,
+                  );
                   const channelName = resolvedName
                     ? `#${resolvedName}`
                     : channelId;
@@ -627,6 +635,7 @@ export class SlackHandler {
         const isNonEphemeralConditional =
           await this.channelConfig.isNonEphemeralConditionalChannel(
             event.channel,
+            event.channel_type,
           );
 
         // Check thread participation rules
@@ -745,6 +754,7 @@ export class SlackHandler {
       // Send rejection message
       await this.sendMessage(
         event.channel,
+        event.channel_type,
         {
           text: "Sorry, this bot is only available to authorized users.",
           thread_ts: event.thread_ts || event.ts,
@@ -776,6 +786,7 @@ export class SlackHandler {
 
       const channelName = await this.channelConfig.getChannelName(
         event.channel,
+        event.channel_type,
       );
       const combinedText = this.getCombinedText(event.text, event.blocks);
       const channelConfig =
@@ -830,7 +841,11 @@ export class SlackHandler {
       this.channelConfig.reloadConfiguration();
 
       // Reload context files for this channel
-      const refreshed = await this.getChannelContext(event.channel, true);
+      const refreshed = await this.getChannelContext(
+        event.channel,
+        event.channel_type,
+        true,
+      );
 
       const reloadMessage =
         "✅ **Cache reloaded successfully**\n" +
@@ -842,6 +857,7 @@ export class SlackHandler {
 
       await this.sendMessage(
         event.channel,
+        event.channel_type,
         {
           text: reloadMessage,
           thread_ts: event.thread_ts || event.ts,
@@ -1005,7 +1021,10 @@ export class SlackHandler {
       !!event.explicitMention,
       event.text,
     );
-    const channelContext = await this.getChannelContext(event.channel);
+    const channelContext = await this.getChannelContext(
+      event.channel,
+      event.channel_type,
+    );
 
     // Combine general and channel-specific context for system prompt
     let systemPrompt = generalContext;
@@ -1041,6 +1060,7 @@ export class SlackHandler {
     if (!isDM) {
       const channelName = await this.channelConfig.getChannelName(
         event.channel,
+        event.channel_type,
       );
       if (channelName) {
         sections.push(`## Channel:\n#${channelName} (${event.channel})`);
@@ -1182,6 +1202,7 @@ export class SlackHandler {
    */
   private createVotingButtonsBlock(data: {
     channel: string;
+    channel_type?: SlackChannelType;
     root_ts?: string;
     question?: string;
     answer?: string;
@@ -1263,6 +1284,7 @@ export class SlackHandler {
     threadTs: string | undefined,
     votingData: {
       channel: string;
+      channel_type?: SlackChannelType;
       root_ts?: string;
       question?: string;
       answer?: string;
@@ -1305,6 +1327,7 @@ export class SlackHandler {
    */
   private createSafeButtonValue(data: {
     channel: string;
+    channel_type?: SlackChannelType;
     root_ts?: string;
     question?: string;
     answer?: string;
@@ -1319,6 +1342,7 @@ export class SlackHandler {
       s.length > maxLen ? s.substring(0, maxLen) + "..." : s;
 
     const safeData: any = { channel: data.channel };
+    if (data.channel_type) safeData.channel_type = data.channel_type;
     if (data.root_ts) safeData.root_ts = data.root_ts;
     if (data.thread_ts) safeData.thread_ts = data.thread_ts;
     if (data.original_root_ts)
@@ -1362,6 +1386,7 @@ export class SlackHandler {
       const threadTs = event.thread_ts || event.ts;
       const votingData = {
         channel: event.channel,
+        channel_type: event.channel_type,
         root_ts: threadTs,
         question: event.text || "",
         answer: consolidatedMessage,
@@ -1382,6 +1407,7 @@ export class SlackHandler {
 
         await this.sendMessage(
           event.channel,
+          event.channel_type,
           messageOptions,
           say,
           event.explicitMention,
@@ -1398,6 +1424,7 @@ export class SlackHandler {
           opts =>
             this.sendMessage(
               event.channel,
+              event.channel_type,
               opts,
               say,
               event.explicitMention,
@@ -1419,12 +1446,14 @@ export class SlackHandler {
         // Fetch channel name for tracking (uses cached lookup)
         const channelName = await this.channelConfig.getChannelName(
           event.channel,
+          event.channel_type,
         );
 
         await trackMessageProcessed({
           slackUsername: await UserUtils.getUsername(this.app, event.user),
           slackHandle: await UserUtils.getSlackHandle(this.app, event.user),
           slackChannel: event.channel,
+          slackChannelType: event.channel_type,
           slackChannelName: channelName,
           slackThreadTs: event.thread_ts,
           slackMessageLink,
@@ -1450,7 +1479,10 @@ export class SlackHandler {
     if (!willBeEphemeral && (await this.shouldShowReactions(event))) {
       const isConditionalSkip =
         result.shouldNotRespond &&
-        (await this.channelConfig.isConditionalReplyChannel(event.channel));
+        (await this.channelConfig.isConditionalReplyChannel(
+          event.channel,
+          event.channel_type,
+        ));
       await this.reactionManager.updateReaction(
         reactionKey,
         isConditionalSkip ? REACTIONS.SKIPPED : REACTIONS.COMPLETE,
@@ -1463,6 +1495,7 @@ export class SlackHandler {
         "Debug logs:\n```\n" + result.debugLogs.join("\n") + "\n```";
       await this.sendMessage(
         event.channel,
+        event.channel_type,
         {
           text: debugText,
           thread_ts: event.thread_ts || event.ts,
@@ -1531,6 +1564,7 @@ export class SlackHandler {
 
       await this.sendMessage(
         event.channel,
+        event.channel_type,
         {
           text: errorMessage,
           thread_ts: event.thread_ts || event.ts,
@@ -1550,9 +1584,13 @@ export class SlackHandler {
 
   private async getChannelContext(
     channelId: string,
+    channelType: SlackChannelType,
     forceRefresh = false,
   ): Promise<string> {
-    const filename = await this.channelConfig.getContextSource(channelId);
+    const filename = await this.channelConfig.getContextSource(
+      channelId,
+      channelType,
+    );
     if (!filename) return "";
 
     const now = Date.now();
@@ -1695,7 +1733,10 @@ export class SlackHandler {
         let isConditionalChannel = false;
         let conditionalChannel: any = null;
         if (!isDM) {
-          channelName = await this.channelConfig.getChannelName(channelId);
+          channelName = await this.channelConfig.getChannelName(
+            channelId,
+            channelType,
+          );
           isConditionalChannel =
             !!(await this.channelConfig.findMatchingConditionalChannel(
               channelName,
@@ -1759,14 +1800,20 @@ export class SlackHandler {
       "app_mention",
       async ({ event, say }: { event: any; say: any }) => {
         const channelId = event.channel;
-        const channelType = event.channel_type;
+        // app_mention events don't include channel_type in their payload;
+        // look it up via conversations.info when missing.
+        const channelType: SlackChannelType =
+          event.channel_type ??
+          (await this.channelConfig.lookupChannelType(channelId));
         const isDM = this.channelConfig.isDirectMessage(channelType);
 
         // Skip conditional reply channels - they're handled by app.message
         let hasConditionalChannel = false;
         if (!isDM) {
-          const channelName =
-            await this.channelConfig.getChannelName(channelId);
+          const channelName = await this.channelConfig.getChannelName(
+            channelId,
+            channelType,
+          );
           hasConditionalChannel =
             !!(await this.channelConfig.findMatchingConditionalChannel(
               channelName,
@@ -1848,6 +1895,8 @@ export class SlackHandler {
           const action = body?.actions?.[0];
           const parsed = this.parseVotePayload(action);
           const channel = parsed?.channel || body?.container?.channel_id;
+          // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+          const channelType = parsed?.channel_type || "im";
           const ts = body?.container?.message_ts;
           const userId = body?.user?.id;
 
@@ -1862,8 +1911,11 @@ export class SlackHandler {
               slackUsername: await UserUtils.getUsername(this.app, userId),
               slackHandle: userId,
               slackChannel: channel,
-              slackChannelName:
-                await this.channelConfig.getChannelName(channel),
+              slackChannelType: channelType,
+              slackChannelName: await this.channelConfig.getChannelName(
+                channel,
+                channelType,
+              ),
               slackThreadTs: parsed?.root_ts,
               slackMessageLink,
               upvoteStatus: "delete",
@@ -1954,6 +2006,7 @@ export class SlackHandler {
               chunkBlocks.push(
                 this.createVotingButtonsBlock({
                   channel: channel,
+                  channel_type: votingData?.channel_type,
                   root_ts: votingData?.root_ts || threadTs || "",
                   question: votingData?.question || "",
                   answer: votingData?.answer || messageText,
@@ -2048,6 +2101,8 @@ export class SlackHandler {
       const action = body?.actions?.[0];
       const parsed = this.parseVotePayload(action);
       const channel = parsed?.channel || body?.container?.channel_id;
+      // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+      const channelType = parsed?.channel_type || "im";
       const ts = body?.container?.message_ts;
       const userId = body?.user?.id;
 
@@ -2076,7 +2131,11 @@ export class SlackHandler {
           slackUsername: await UserUtils.getUsername(this.app, userId),
           slackHandle: userId,
           slackChannel: channel,
-          slackChannelName: await this.channelConfig.getChannelName(channel),
+          slackChannelType: channelType,
+          slackChannelName: await this.channelConfig.getChannelName(
+            channel,
+            channelType,
+          ),
           slackThreadTs: parsed?.root_ts,
           slackMessageLink,
           upvoteStatus,
@@ -2098,6 +2157,7 @@ export class SlackHandler {
 
   private parseVotePayload(action: any): {
     channel?: string;
+    channel_type?: SlackChannelType;
     answer_ts?: string;
     root_ts?: string;
     question?: string;
@@ -2216,7 +2276,10 @@ export class SlackHandler {
     // Use provided channel name or fetch it for conditional reply pattern matching
     let channelName = providedChannelName;
     if (!channelName && !isDM) {
-      channelName = await this.channelConfig.getChannelName(channelId);
+      channelName = await this.channelConfig.getChannelName(
+        channelId,
+        message.channel_type,
+      );
     }
 
     // Combine message text with block text for conditional pattern matching

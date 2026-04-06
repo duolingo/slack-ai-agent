@@ -41,7 +41,7 @@ export class ChannelConfigManager {
 
   async getChannelName(
     channelId: string,
-    channelType?: SlackChannelType,
+    channelType: SlackChannelType,
   ): Promise<string | undefined> {
     // DM channels don't have names, return placeholder for tracking
     if (this.isDirectMessage(channelType)) {
@@ -119,8 +119,11 @@ export class ChannelConfigManager {
     return context;
   }
 
-  async getContextSource(channelId: string): Promise<string | undefined> {
-    const channelName = await this.getChannelName(channelId);
+  async getContextSource(
+    channelId: string,
+    channelType: SlackChannelType,
+  ): Promise<string | undefined> {
+    const channelName = await this.getChannelName(channelId, channelType);
     if (!channelName) {
       this.logger.debug("Could not resolve channel name for context lookup", {
         channelId,
@@ -161,13 +164,52 @@ export class ChannelConfigManager {
   /**
    * Check if a channel is configured for conditional replies (matches any conditionalReplyChannels pattern)
    */
-  async isConditionalReplyChannel(channelId: string): Promise<boolean> {
-    const channelName = await this.getChannelName(channelId);
+  async isConditionalReplyChannel(
+    channelId: string,
+    channelType: SlackChannelType,
+  ): Promise<boolean> {
+    const channelName = await this.getChannelName(channelId, channelType);
     if (!channelName) {
       return false;
     }
     const pattern = await this.findMatchingConditionalChannel(channelName);
     return pattern !== null;
+  }
+
+  /**
+   * Look up the channel type via conversations.info when the event payload
+   * doesn't include it (e.g. app_mention events).
+   */
+  async lookupChannelType(channelId: string): Promise<SlackChannelType> {
+    if (!this.app) {
+      this.logger.warn(
+        "Slack App not set, cannot look up channel type — defaulting to im (most restrictive)",
+        { channelId },
+      );
+      // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+      return "im";
+    }
+
+    try {
+      const result = await this.app.client.conversations.info({
+        channel: channelId,
+      });
+      const ch = result.channel;
+      if (ch?.is_im) return "im";
+      if (ch?.is_mpim) return "mpim";
+      if (ch?.is_private) return "group";
+      return "channel";
+    } catch (error) {
+      this.logger.warn(
+        "Failed to look up channel type — defaulting to im (most restrictive)",
+        {
+          channelId,
+          error,
+        },
+      );
+      // Default to "im" (most restrictive) to avoid leaking private content in logs/tracking
+      return "im";
+    }
   }
 
   /**
@@ -180,8 +222,11 @@ export class ChannelConfigManager {
   /**
    * Check if a channel is a conditional reply channel that does not use ephemeral messaging.
    */
-  async isNonEphemeralConditionalChannel(channelId: string): Promise<boolean> {
-    const channelName = await this.getChannelName(channelId);
+  async isNonEphemeralConditionalChannel(
+    channelId: string,
+    channelType: SlackChannelType,
+  ): Promise<boolean> {
+    const channelName = await this.getChannelName(channelId, channelType);
     const isConditional =
       !!(await this.findMatchingConditionalChannel(channelName));
     return (

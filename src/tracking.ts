@@ -5,6 +5,7 @@ import {
   CHANNEL_PRIVACY_CACHE_TTL_MS,
 } from "./constants";
 import { config } from "./config";
+import { SlackChannelType } from "./types";
 import { HttpEventHandler } from "./http-event-handler";
 import {
   EventHandler,
@@ -43,7 +44,7 @@ export const initTracking = (app: App): void => {
 /** Check if full content logging is allowed (public channel or allowlisted) */
 export const isFullContentLoggingAllowed = async (
   channelId: string,
-  channelType?: string,
+  channelType: SlackChannelType,
 ): Promise<boolean> => {
   if (!channelId) return false;
   if (channelType === "im") return false; // DMs = private
