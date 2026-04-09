@@ -15,6 +15,8 @@ interface Employee {
   role?: string; // Access role from tool-allowlist.yaml (required for tool access)
   function?: string;
   orgs?: string[];
+  location?: string;
+  tzName?: string;
 }
 
 // YAML format: Record<slackUserId, EmployeeEntry>
