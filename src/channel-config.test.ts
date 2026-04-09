@@ -148,16 +148,16 @@ describe("ChannelConfigManager", () => {
       expect(await manager.lookupChannelType("C123")).toBe("channel");
     });
 
-    it('defaults to "channel" on API error', async () => {
+    it('defaults to "im" on API error', async () => {
       mockApp.client.conversations.info.mockRejectedValue(
         new Error("channel_not_found"),
       );
-      expect(await manager.lookupChannelType("C123")).toBe("channel");
+      expect(await manager.lookupChannelType("C123")).toBe("im");
     });
 
-    it('defaults to "channel" when app is not set', async () => {
+    it('defaults to "im" when app is not set', async () => {
       const noAppManager = new ChannelConfigManager();
-      expect(await noAppManager.lookupChannelType("C123")).toBe("channel");
+      expect(await noAppManager.lookupChannelType("C123")).toBe("im");
     });
   });
 });
