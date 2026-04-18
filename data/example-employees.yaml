@@ -11,6 +11,8 @@ U0123ABCDEF:
   lastName: "Doe"
   github: "janedoe"
   role: "privilegedEngineer"
+  location: "Pittsburgh"
+  tzName: "US/Eastern"
 
 U9876ZYXWVU:
   email: "john.smith@example.com"
@@ -18,6 +20,8 @@ U9876ZYXWVU:
   lastName: "Smith"
   github: "johnsmith"
   role: "engineer"
+  location: "New York"
+  tzName: "US/Eastern"
 
 UABCD123456:
   email: "carol.jones@example.com"
