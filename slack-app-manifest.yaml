@@ -19,6 +19,9 @@ oauth_config:
       - chat:write
       - chat:write.public
       - files:read
+      - groups:history
+      - groups:read
+      - groups:write
       - im:history
       - im:read
       - im:write
@@ -29,6 +32,7 @@ settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - message.groups
       - message.im
       - member_joined_channel
   interactivity:
