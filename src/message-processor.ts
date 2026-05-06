@@ -1,6 +1,11 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeHandler } from "./claude-handler";
-import { ConversationSession, SlackContext, TokenUsage } from "./types";
+import {
+  ConversationSession,
+  SlackContext,
+  TokenUsage,
+  PhaseTimings,
+} from "./types";
 import { Logger, truncateForLog } from "./logger";
 import { ReactionManager, REACTIONS } from "./reaction-manager";
 import { ChannelConfigManager } from "./channel-config";
@@ -14,8 +19,10 @@ export interface MessageProcessorResult {
   shouldNotRespond: boolean;
   debugLogs?: string[];
   toolCalls?: string[];
+  toolCallNames?: string[];
   tokenUsage?: TokenUsage;
   turnCount?: number;
+  phaseTimings?: PhaseTimings;
 }
 
 export class MessageProcessor {
@@ -93,9 +100,11 @@ export class MessageProcessor {
     const currentMessages: string[] = [];
     const debugLogs: string[] = [];
     const toolCalls: string[] = [];
+    const toolCallNames: string[] = [];
     let shouldNotRespond = false;
     let tokenUsage: TokenUsage | undefined;
     let turnCount = 0;
+    const timings: PhaseTimings = {};
 
     // Check if debug mode is enabled
     const isDebugMode = prompt.includes("[DEBUG]");
@@ -108,6 +117,7 @@ export class MessageProcessor {
     });
 
     // Start with thinking reaction
+    const reactionStart = Date.now();
     if (
       sessionKey &&
       slackContext &&
@@ -115,6 +125,10 @@ export class MessageProcessor {
     ) {
       await this.reactionManager.updateReaction(sessionKey, REACTIONS.THINKING);
     }
+    timings.initial_reaction_ms = Date.now() - reactionStart;
+
+    const streamStart = Date.now();
+    let firstMessageReceived = false;
 
     for await (const message of this.claudeHandler.streamQuery(
       prompt,
@@ -125,6 +139,11 @@ export class MessageProcessor {
       async () => {},
       systemPrompt,
     )) {
+      if (!firstMessageReceived) {
+        timings.claude_time_to_first_message_ms = Date.now() - streamStart;
+        firstMessageReceived = true;
+      }
+
       if (abortController.signal.aborted) {
         this.logger.warn("⏹️ Aborted", { sessionKey });
         break;
@@ -142,6 +161,7 @@ export class MessageProcessor {
           isDebugMode,
           debugLogs,
           toolCalls,
+          toolCallNames,
           allowFullLogging,
         );
 
@@ -199,6 +219,8 @@ export class MessageProcessor {
       }
     }
 
+    timings.claude_total_stream_ms = Date.now() - streamStart;
+
     // Log completion summary with token usage and turn count
     const completionLog: Record<string, unknown> = {
       msgs: currentMessages.length,
@@ -222,8 +244,10 @@ export class MessageProcessor {
       shouldNotRespond,
       debugLogs: isDebugMode ? debugLogs : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      toolCallNames: toolCallNames.length > 0 ? toolCallNames : undefined,
       tokenUsage,
       turnCount: turnCount > 0 ? turnCount : undefined,
+      phaseTimings: timings,
     };
   }
 
@@ -238,6 +262,7 @@ export class MessageProcessor {
     isDebugMode?: boolean,
     debugLogs?: string[],
     toolCallsTracking?: string[],
+    toolNamesTracking?: string[],
     allowFullLogging?: boolean,
   ): Promise<void> {
     // Check if this is a tool use message
@@ -255,7 +280,14 @@ export class MessageProcessor {
             parameters: part.input || {},
           })) || [];
 
-      const toolNames = toolCalls.map((t: any) => t.name);
+      // Skill invocations are logged as `Skill:<name>` so names-only tracking
+      // (DMs / private channels) still reveals which skill ran. The `skill`
+      // parameter is a fixed enumerated value, not user content.
+      const toolNames = toolCalls.map((t: any) =>
+        t.name === "Skill" && typeof t.parameters?.skill === "string"
+          ? `Skill:${t.parameters.skill}`
+          : t.name,
+      );
 
       // Format tool call with params
       const formatToolCall = (t: any) => {
@@ -280,8 +312,11 @@ export class MessageProcessor {
         isDebugMode,
         debugLogs,
       );
-      // Track individual tool calls for analytics (preserves correct count)
+      // Track individual tool calls for analytics (preserves correct count).
+      // Names-only list mirrors the formatted list so tracking can emit the
+      // safe variant for DMs / private channels.
       if (toolCallsTracking) toolCallsTracking.push(...formattedCalls);
+      if (toolNamesTracking) toolNamesTracking.push(...toolNames);
 
       if (
         sessionKey &&

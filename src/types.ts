@@ -58,3 +58,5 @@ export interface TokenUsage {
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
 }
+
+export type PhaseTimings = Record<string, number>;

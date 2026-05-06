@@ -10,6 +10,7 @@ interface Employee {
   email: string;
   firstName: string;
   lastName: string;
+  userId?: number | string;
   slack?: string;
   github?: string;
   role?: string; // Access role from tool-allowlist.yaml (required for tool access)
@@ -141,6 +142,25 @@ export class UserUtils {
       logger.error("Error getting employee by Slack ID", { userId, error });
       return null;
     }
+  }
+
+  /**
+   * Internal user id for analytics distinct_id, resolved from generated employee data.
+   */
+  static async getUserIdBySlackId(slackId: string): Promise<number | null> {
+    const employee = await this.getEmployeeBySlackId(slackId);
+    const raw = employee?.userId;
+    if (raw == null || raw === "") {
+      return null;
+    }
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(n)) {
+      logger.warn("Invalid userId in employee record", {
+        slackId: slackId.slice(-4),
+      });
+      return null;
+    }
+    return n;
   }
 
   static readonly EMPLOYEES_FILE = "data/employees.yaml";

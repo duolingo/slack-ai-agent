@@ -70,7 +70,7 @@ export const config = {
   },
   anthropic: {
     apiKey: getRequiredEnv("ANTHROPIC_API_KEY"),
-    model: "claude-opus-4-6", // Claude 4.6 Opus - most capable model
+    model: "claude-opus-4-7", // Claude 4.7 Opus - most capable model
   },
   slackWorkspaceUrl: getRequiredEnv("SLACK_WORKSPACE_URL"),
   trackingClientId: process.env.TRACKING_CLIENT_ID || "slack-ai-agent",

@@ -12,6 +12,7 @@ import {
   SlackChannelType,
   SlackContext,
   ConversationSession,
+  PhaseTimings,
 } from "./types";
 import {
   trackMessageProcessed,
@@ -369,9 +370,8 @@ export class SlackHandler {
 
               // Create fresh blocks for each chunk with the chunked text
               // Don't reuse messageOptions.blocks as they contain the full message
-              const chunkBlocks: any[] = [
-                { type: "section", text: { type: "mrkdwn", text: chunkText } },
-              ];
+              const chunkBlocks: any[] =
+                this.buildTextAndImageBlocks(chunkText);
 
               // Add "Post to Channel" and "Delete" buttons
               // Use minimal voting data without the full answer to save space
@@ -583,6 +583,9 @@ export class SlackHandler {
     // Wrap entire handling with messageId context for automatic log correlation
     return withMessageId(messageId, async () => {
       try {
+        const timings: PhaseTimings = {};
+        let phaseStart = startTime;
+
         // Log incoming message with compact format and tracking link
         const incomingMessageLink = generateSlackMessageLink(
           event.channel,
@@ -592,6 +595,9 @@ export class SlackHandler {
           event.channel,
           event.channel_type,
         );
+        timings.content_logging_check_ms = Date.now() - phaseStart;
+        phaseStart = Date.now();
+
         this.logger.infoSensitive(
           "📥 Incoming:",
           {
@@ -612,6 +618,8 @@ export class SlackHandler {
         if (await this.shouldRejectNonMemberRequest(event, say)) {
           return;
         }
+        timings.skip_and_auth_checks_ms = Date.now() - phaseStart;
+        phaseStart = Date.now();
 
         const sessionKey = this.claudeHandler.getSessionKey(
           event.user,
@@ -637,14 +645,19 @@ export class SlackHandler {
             event.channel,
             event.channel_type,
           );
+        timings.conditional_channel_check_ms = Date.now() - phaseStart;
+        phaseStart = Date.now();
 
         // Check thread participation rules
         if (await this.shouldSkipDueToMultipleParticipants(event)) {
           return;
         }
+        timings.participant_check_ms = Date.now() - phaseStart;
+        phaseStart = Date.now();
 
         // Process files
         const processedFiles = await this.processFiles(event, reactionKey);
+        timings.file_processing_ms = Date.now() - phaseStart;
 
         // Exit if no content to process
         if (!event.text && processedFiles.length === 0) {
@@ -667,10 +680,18 @@ export class SlackHandler {
           reactionKey,
           allowFullLogging,
           isNonEphemeralConditional,
+          timings,
         );
 
         // Send response
-        await this.sendResponse(event, result, say, startTime, reactionKey);
+        await this.sendResponse(
+          event,
+          result,
+          say,
+          startTime,
+          reactionKey,
+          timings,
+        );
 
         // Cleanup
         await this.cleanup(processedFiles, sessionKey, reactionKey);
@@ -710,6 +731,8 @@ export class SlackHandler {
           truncateForLog(fullResponse, RESPONSE_LOG_MAX_LENGTH),
           allowFullLogging,
         );
+
+        this.logger.info("⏱️ Phase timings:", timings);
 
         return;
       } catch (error: any) {
@@ -965,12 +988,18 @@ export class SlackHandler {
     reactionKey: string,
     allowFullLogging?: boolean,
     isNonEphemeralConditional?: boolean,
+    timings?: PhaseTimings,
   ) {
+    const promptStart = Date.now();
+
     // Prepare final prompt and system prompt separately
     const { userPrompt, systemPrompt } = await this.prepareFinalPrompt(
       event,
       processedFiles,
     );
+    if (timings) {
+      timings.prompt_assembly_ms = Date.now() - promptStart;
+    }
 
     // Set up Slack context
     const slackContext: SlackContext = {
@@ -987,7 +1016,8 @@ export class SlackHandler {
     };
 
     // Process with Claude via MessageProcessor
-    return await this.messageProcessor.processClaudeStream(
+    const claudeStart = Date.now();
+    const result = await this.messageProcessor.processClaudeStream(
       userPrompt,
       session,
       abortController,
@@ -997,6 +1027,14 @@ export class SlackHandler {
       systemPrompt,
       allowFullLogging,
     );
+    if (timings) {
+      timings.claude_total_ms = Date.now() - claudeStart;
+      if (result.phaseTimings) {
+        Object.assign(timings, result.phaseTimings);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1298,9 +1336,7 @@ export class SlackHandler {
       const isLastChunk = i === chunks.length - 1;
       const chunk = chunks[i];
 
-      const blocks: any[] = [
-        { type: "section", text: { type: "mrkdwn", text: chunk } },
-      ];
+      const blocks: any[] = this.buildTextAndImageBlocks(chunk);
       if (isLastChunk) {
         blocks.push(this.createVotingButtonsBlock(votingData));
       }
@@ -1370,6 +1406,7 @@ export class SlackHandler {
     say: any,
     startTime?: number,
     reactionKey?: string,
+    phaseTimings?: PhaseTimings,
   ): Promise<void> {
     if (!reactionKey) {
       reactionKey = this.getReactionKey(event);
@@ -1392,13 +1429,14 @@ export class SlackHandler {
         answer: consolidatedMessage,
       };
 
+      const postStart = Date.now();
       if (willBeEphemeral) {
         // Send the full message unsplit — the ephemeral handler does its own chunking
         const messageOptions: any = {
           text: formatted,
           thread_ts: threadTs,
           blocks: [
-            { type: "section", text: { type: "mrkdwn", text: formatted } },
+            ...this.buildTextAndImageBlocks(formatted),
             this.createVotingButtonsBlock(votingData),
           ],
           unfurl_links: false,
@@ -1438,6 +1476,10 @@ export class SlackHandler {
       // Track successful message processing
       try {
         const latencyMs = startTime ? Date.now() - startTime : 0;
+        if (phaseTimings) {
+          phaseTimings.send_response_ms = Date.now() - postStart;
+          phaseTimings.total_ms = latencyMs;
+        }
         const slackMessageLink = generateSlackMessageLink(
           event.channel,
           event.ts, // Always use original message timestamp for consistency
@@ -1450,6 +1492,7 @@ export class SlackHandler {
         );
 
         await trackMessageProcessed({
+          slackUserId: event.user,
           slackUsername: await UserUtils.getUsername(this.app, event.user),
           slackHandle: await UserUtils.getSlackHandle(this.app, event.user),
           slackChannel: event.channel,
@@ -1461,11 +1504,13 @@ export class SlackHandler {
           slackAppAnswer: consolidatedMessage,
           latencyMs,
           toolCalls: result.toolCalls,
+          toolCallNames: result.toolCallNames,
           inputTokens: result.tokenUsage?.inputTokens,
           outputTokens: result.tokenUsage?.outputTokens,
           cacheReadInputTokens: result.tokenUsage?.cacheReadInputTokens,
           cacheCreationInputTokens: result.tokenUsage?.cacheCreationInputTokens,
           turnCount: result.turnCount,
+          phaseTimings,
         });
       } catch (trackingError) {
         this.logger.warn(
@@ -1621,6 +1666,50 @@ export class SlackHandler {
       );
       return cached?.text || "";
     }
+  }
+
+  /**
+   * Build Block Kit blocks for a text chunk, extracting image URLs and
+   * rendering them as native Slack image blocks so they display inline.
+   */
+  private buildTextAndImageBlocks(text: string): any[] {
+    // Match image URLs in two forms:
+    // 1. Slack-formatted links: <https://...image.png|alt text> or <https://...image.png>
+    // 2. Raw/bare URLs: https://...image.png
+    // Both support optional query parameters after the extension.
+    const imageUrls: string[] = [];
+
+    // Slack-formatted links: <URL|text> or <URL> — the closing > delimits
+    // the URL, so no trailing whitespace/end-of-string check is needed.
+    const slackLinkPattern =
+      /<(https?:\/\/[^>|]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^>|]*)?)(?:\|[^>]*)?>/gim;
+    let match: RegExpExecArray | null;
+    while ((match = slackLinkPattern.exec(text)) !== null) {
+      imageUrls.push(match[1]);
+    }
+
+    // Raw URLs (fallback for cases where links aren't Slack-formatted)
+    // Allow trailing punctuation (.,;:!?) before whitespace/end-of-string
+    const rawUrlPattern =
+      /(?:^|\s)(https?:\/\/[^\s<>]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s<>]*)?)(?=[.,;:!?)}\]\s]|$)/gim;
+    while ((match = rawUrlPattern.exec(text)) !== null) {
+      if (!imageUrls.includes(match[1])) {
+        imageUrls.push(match[1]);
+      }
+    }
+
+    const blocks: any[] = [{ type: "section", text: { type: "mrkdwn", text } }];
+
+    // Append an image block for each extracted URL (Slack allows up to 50 blocks)
+    for (const url of imageUrls) {
+      blocks.push({
+        type: "image",
+        image_url: url,
+        alt_text: "Generated image",
+      });
+    }
+
+    return blocks;
   }
 
   private formatMessage(text: string): string {
@@ -1908,6 +1997,7 @@ export class SlackHandler {
             );
 
             await trackMessageFeedback({
+              slackUserId: userId,
               slackUsername: await UserUtils.getUsername(this.app, userId),
               slackHandle: userId,
               slackChannel: channel,
@@ -1993,13 +2083,8 @@ export class SlackHandler {
             const isLastChunk = i === fullMessageChunks.length - 1;
             const chunk = fullMessageChunks[i];
 
-            // Reconstruct blocks for each chunk
-            const chunkBlocks: any[] = [
-              {
-                type: "section",
-                text: { type: "mrkdwn", text: chunk },
-              },
-            ];
+            // Reconstruct blocks for each chunk (with inline image blocks)
+            const chunkBlocks: any[] = this.buildTextAndImageBlocks(chunk);
 
             // Only add voting buttons to the last chunk
             if (isLastChunk) {
@@ -2128,6 +2213,7 @@ export class SlackHandler {
           parsed?.root_ts || ts,
         );
         await trackMessageFeedback({
+          slackUserId: userId,
           slackUsername: await UserUtils.getUsername(this.app, userId),
           slackHandle: userId,
           slackChannel: channel,

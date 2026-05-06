@@ -1,8 +1,10 @@
-import { SlackChannelType } from "./types";
+import { SlackChannelType, PhaseTimings } from "./types";
 
 // ─── Event types ────────────────────────────────────────────────────────────
 
 export interface MessageProcessedEvent {
+  /** Slack member id (U…) — used with employees.json-derived data to set tracking distinct_id. */
+  slackUserId?: string;
   slackUsername: string;
   slackHandle?: string | null;
   slackChannel: string;
@@ -14,14 +16,17 @@ export interface MessageProcessedEvent {
   slackAppAnswer: string;
   latencyMs: number;
   toolCalls?: string[];
+  toolCallNames?: string[];
   inputTokens?: number;
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
   turnCount?: number;
+  phaseTimings?: PhaseTimings;
 }
 
 export interface FeedbackEvent {
+  slackUserId?: string;
   slackUsername: string;
   slackHandle?: string | null;
   slackChannel: string;

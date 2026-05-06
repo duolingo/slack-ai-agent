@@ -1,5 +1,7 @@
-import { App } from "@slack/bolt";
+// config is imported before tracing so dotenv.config() runs first to set environment variables.
 import { config } from "./config";
+import "./tracing";
+import { App } from "@slack/bolt";
 import { ClaudeHandler } from "./claude-handler";
 import { SlackHandler } from "./slack-handler";
 import { McpManager } from "./mcp-manager";
