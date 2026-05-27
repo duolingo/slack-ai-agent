@@ -45,6 +45,8 @@ export interface SlackContext {
   botId?: string;
   workflowId?: string;
   messageTs?: string;
+  /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
+  messageText?: string;
   explicitMention?: boolean;
   replyBroadcast?: boolean;
   /** True when the channel is a non-ephemeral conditional reply channel

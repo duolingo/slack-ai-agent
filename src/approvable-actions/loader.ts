@@ -40,14 +40,18 @@ export const loadApprovableActions = async (): Promise<
     return [];
   }
 
-  const files = fs
-    .readdirSync(ACTIONS_DIR)
-    .filter(
-      f =>
-        f.endsWith(CONFIG_EXT) &&
-        !f.endsWith(".d.ts") &&
-        !f.startsWith("example-"),
-    );
+  const files = fs.readdirSync(ACTIONS_DIR).filter(
+    f =>
+      f.endsWith(CONFIG_EXT) &&
+      !f.endsWith(".d.ts") &&
+      // Test files live alongside source modules. Jest discovers them via
+      // its testMatch glob; the loader must skip them or it'll try to
+      // `import()` files whose top-level describe()/it() calls reference
+      // Jest globals that aren't defined outside the test runner.
+      !f.endsWith(".test.ts") &&
+      !f.endsWith(".test.js") &&
+      !f.startsWith("example-"),
+  );
 
   if (files.length === 0) {
     return [];

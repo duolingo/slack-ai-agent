@@ -7,6 +7,7 @@ import { config } from "./config";
 import { ChannelConfigManager } from "./channel-config";
 import { ReactionManager, REACTIONS } from "./reaction-manager";
 import { MessageProcessor } from "./message-processor";
+import { resolveMode } from "./request-mode";
 import {
   MessageEvent,
   SlackChannelType,
@@ -1010,10 +1011,18 @@ export class SlackHandler {
       botId: event.bot_id,
       workflowId: event.workflow_id,
       messageTs: event.ts,
+      messageText: event.text,
       explicitMention: event.explicitMention,
       replyBroadcast: event.replyBroadcast,
       isNonEphemeralConditionalChannel: isNonEphemeralConditional ?? false,
     };
+
+    // Message triggers in event.text override the channel-level default.
+    const channelMode = await this.channelConfig.getChannelModelOverride(
+      event.channel,
+      event.channel_type,
+    );
+    const requestMode = resolveMode(event.text, channelMode);
 
     // Process with Claude via MessageProcessor
     const claudeStart = Date.now();
@@ -1026,6 +1035,7 @@ export class SlackHandler {
       reactionKey,
       systemPrompt,
       allowFullLogging,
+      requestMode,
     );
     if (timings) {
       timings.claude_total_ms = Date.now() - claudeStart;
@@ -1473,35 +1483,30 @@ export class SlackHandler {
         );
       }
 
-      // Track successful message processing
+      if (phaseTimings) {
+        phaseTimings.send_response_ms = Date.now() - postStart;
+      }
+    }
+
+    // Track every turn that produced content, even when the post was muted.
+    if (result.messages.length > 0) {
       try {
         const latencyMs = startTime ? Date.now() - startTime : 0;
-        if (phaseTimings) {
-          phaseTimings.send_response_ms = Date.now() - postStart;
-          phaseTimings.total_ms = latencyMs;
-        }
-        const slackMessageLink = generateSlackMessageLink(
-          event.channel,
-          event.ts, // Always use original message timestamp for consistency
-        );
-
-        // Fetch channel name for tracking (uses cached lookup)
-        const channelName = await this.channelConfig.getChannelName(
-          event.channel,
-          event.channel_type,
-        );
-
+        if (phaseTimings) phaseTimings.total_ms = latencyMs;
         await trackMessageProcessed({
           slackUserId: event.user,
           slackUsername: await UserUtils.getUsername(this.app, event.user),
           slackHandle: await UserUtils.getSlackHandle(this.app, event.user),
           slackChannel: event.channel,
           slackChannelType: event.channel_type,
-          slackChannelName: channelName,
+          slackChannelName: await this.channelConfig.getChannelName(
+            event.channel,
+            event.channel_type,
+          ),
           slackThreadTs: event.thread_ts,
-          slackMessageLink,
+          slackMessageLink: generateSlackMessageLink(event.channel, event.ts),
           slackAppQuestion: event.text || "",
-          slackAppAnswer: consolidatedMessage,
+          slackAppAnswer: result.messages.join("\n\n"),
           latencyMs,
           toolCalls: result.toolCalls,
           toolCallNames: result.toolCallNames,

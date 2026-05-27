@@ -52,8 +52,8 @@ member:
 # Additional tools available to engineers
 engineer:
   # Example: CI/CD tools
-  # - mcp__jenkins__get_build_info
-  # - mcp__jenkins__get_build_logs
+  # - mcp__jenkins__get_build
+  # - mcp__jenkins__get_build_console_output
 
   # Example: Monitoring tools
   # - mcp__grafana__search_dashboards

@@ -19,30 +19,30 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^25.2.2",
-    "jest": "^30.3.0",
-    "ts-jest": "^29.4.6",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "@types/node": "^25.9.1",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.114",
-    "@anthropic-ai/sdk": "^0.72.1",
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.147",
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/auto-instrumentations-node": "^0.74.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.216.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.76.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.218.0",
     "@opentelemetry/resources": "^2.7.1",
-    "@opentelemetry/sdk-node": "^0.216.0",
-    "@opentelemetry/semantic-conventions": "^1.40.0",
-    "@slack/bolt": "^4.6.0",
+    "@opentelemetry/sdk-node": "^0.218.0",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@slack/bolt": "^4.7.2",
     "@types/node-fetch": "^2.6.13",
     "axios": "^1.13.6",
-    "dotenv": "^17.2.4",
+    "dotenv": "^17.4.2",
     "js-yaml": "^4.1.1",
-    "jsonrepair": "^3.13.2",
+    "jsonrepair": "^3.14.0",
     "node-fetch": "^3.3.2",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "overrides": {
     "fast-xml-parser": "^5.3.4"

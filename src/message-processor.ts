@@ -1,5 +1,6 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeHandler } from "./claude-handler";
+import { RequestMode } from "./request-mode";
 import {
   ConversationSession,
   SlackContext,
@@ -96,6 +97,7 @@ export class MessageProcessor {
     sessionKey?: string,
     systemPrompt?: string,
     allowFullLogging?: boolean,
+    requestMode?: RequestMode,
   ): Promise<MessageProcessorResult> {
     const currentMessages: string[] = [];
     const debugLogs: string[] = [];
@@ -138,6 +140,7 @@ export class MessageProcessor {
       slackContext,
       async () => {},
       systemPrompt,
+      requestMode,
     )) {
       if (!firstMessageReceived) {
         timings.claude_time_to_first_message_ms = Date.now() - streamStart;
@@ -164,6 +167,15 @@ export class MessageProcessor {
           toolCallNames,
           allowFullLogging,
         );
+
+        // Approvable actions post their own confirmation dialog; mute the
+        // standard reply so users don't see a duplicate preamble.
+        if (
+          !shouldNotRespond &&
+          toolCallNames.some(n => n.startsWith("mcp__approvable-actions__"))
+        ) {
+          shouldNotRespond = true;
+        }
 
         // Check for special responses
         const content = this.extractTextContent(message);

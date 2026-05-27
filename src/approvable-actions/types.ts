@@ -12,6 +12,8 @@ export interface ActionSlackContext {
   channelType: SlackChannelType;
   threadTs?: string;
   messageTs: string;
+  /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
+  messageText?: string;
 }
 
 /**
@@ -23,6 +25,11 @@ export interface ActionDependencies {
   /** Timestamp of the confirmation dialog message — actions should update
    *  this message in-place for status changes instead of posting new messages. */
   confirmationMessageTs?: string;
+  /** Form state from the confirmation dialog at approval time — Slack's
+   *  `body.state.values`, keyed by block_id then action_id. Lets actions
+   *  read user-toggled inputs (checkboxes, selects) embedded in their
+   *  confirmation blocks. Undefined for YOLO-bypass executions. */
+  formState?: Record<string, Record<string, any>>;
 }
 
 /**
@@ -54,6 +61,15 @@ export interface ApprovableAction<TParams> {
     ctx: ActionSlackContext,
     deps: ActionDependencies,
   ): Promise<void>;
+  /** Optional. Register Slack app event handlers (e.g. block_actions for
+   *  buttons rendered in messages this action posts) once at startup. The
+   *  registry calls this for each registered action right after it wires
+   *  up the generic approve/cancel handlers. */
+  setupActionHandlers?(app: App): void;
+  /** Optional list of Slack emoji shortcodes (e.g. [":yolo-jira:", ":duo-ai-bot-jira:"]).
+   *  When any of them is present in the user's message text the confirmation
+   *  dialog is skipped and the action executes immediately. */
+  yoloEmojis?: string[];
 }
 
 /**
