@@ -2,13 +2,19 @@ import { App } from "@slack/bolt";
 import { Logger } from "./logger";
 import { SlackChannelType } from "./types";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
+import { AllowedModel, EffortLevel } from "./request-mode";
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
 
-interface ContextSourcePattern {
+interface ChannelSettings {
   channelNamePattern: string;
-  file: string;
+  /** Instruction file (in config/instructions/) appended as channel context. */
+  file?: string;
+  /** Per-channel Claude model override (one of the AllowedModel literals). */
+  model?: AllowedModel;
+  /** Per-channel effort override. Dropped for models that don't accept effort (e.g. Haiku). */
+  effort?: EffortLevel;
 }
 
 interface ConditionalReplyChannel {
@@ -20,7 +26,8 @@ interface ConditionalReplyChannel {
 }
 
 interface ChannelConfig {
-  contextSources: ContextSourcePattern[];
+  /** Per-channel context + model/effort settings. First matching pattern wins. */
+  channelSettings: ChannelSettings[];
   conditionalReplyChannels?: ConditionalReplyChannel[];
   ephemeralChannelConfig: Record<string, string[]>;
   dmNotificationConfig: Record<string, string[]>;
@@ -119,46 +126,32 @@ export class ChannelConfigManager {
     return context;
   }
 
+  /** First matching channelSettings entry for the given channel, if any. */
+  private async findChannelSettings(
+    channelId: string,
+    channelType: SlackChannelType,
+  ): Promise<ChannelSettings | undefined> {
+    const channelName = await this.getChannelName(channelId, channelType);
+    if (!channelName) return undefined;
+    const settings = (await this.loadConfig()).channelSettings || [];
+    return settings.find(s => {
+      try {
+        return new RegExp(s.channelNamePattern).test(channelName);
+      } catch (error) {
+        this.logger.error("Invalid regex in channelSettings", {
+          pattern: s.channelNamePattern,
+          error,
+        });
+        return false;
+      }
+    });
+  }
+
   async getContextSource(
     channelId: string,
     channelType: SlackChannelType,
   ): Promise<string | undefined> {
-    const channelName = await this.getChannelName(channelId, channelType);
-    if (!channelName) {
-      this.logger.debug("Could not resolve channel name for context lookup", {
-        channelId,
-      });
-      return undefined;
-    }
-
-    const loadedConfig = await this.loadConfig();
-    const contextSources = loadedConfig.contextSources;
-
-    // Iterate through patterns and find a match
-    for (const source of contextSources) {
-      try {
-        const regex = new RegExp(source.channelNamePattern);
-        if (regex.test(channelName)) {
-          this.logger.debug("Matched channel name to context source", {
-            channelName,
-            pattern: source.channelNamePattern,
-            file: source.file,
-          });
-          return source.file;
-        }
-      } catch (regexError) {
-        this.logger.error("Invalid regex pattern in context source", {
-          pattern: source.channelNamePattern,
-          error: regexError,
-        });
-      }
-    }
-
-    this.logger.debug("No matching context source found for channel", {
-      channelName,
-      channelId,
-    });
-    return undefined;
+    return (await this.findChannelSettings(channelId, channelType))?.file;
   }
 
   /**
@@ -359,6 +352,16 @@ export class ChannelConfigManager {
     if (match) return true;
 
     return isMentioned;
+  }
+
+  /** Per-channel Claude model + effort override, if configured. */
+  async getChannelModelOverride(
+    channelId: string,
+    channelType: SlackChannelType,
+  ): Promise<{ model?: AllowedModel; effort?: EffortLevel } | undefined> {
+    const s = await this.findChannelSettings(channelId, channelType);
+    if (!s?.model && !s?.effort) return undefined;
+    return { model: s.model, effort: s.effort };
   }
 
   /**

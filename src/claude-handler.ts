@@ -6,6 +6,7 @@ import { config } from "./config";
 import { UserUtils } from "./user-utils";
 import { loadSubagentDefinitions } from "./validation-agent";
 import type { ApprovableActionRegistry } from "./approvable-actions";
+import { RequestMode } from "./request-mode";
 
 /** Default max age for inactive session cleanup (30 minutes). */
 export const DEFAULT_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
@@ -121,6 +122,7 @@ export class ClaudeHandler {
     slackContext?: SlackContext,
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
+    requestMode?: RequestMode,
   ): AsyncGenerator<SDKMessage, void, unknown> {
     for (
       let globalAttempt = 0;
@@ -136,6 +138,7 @@ export class ClaudeHandler {
           slackContext,
           onRetry,
           systemPrompt,
+          requestMode,
         );
         return;
       } catch (error) {
@@ -177,14 +180,21 @@ export class ClaudeHandler {
     slackContext?: SlackContext,
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
+    requestMode?: RequestMode,
   ): AsyncGenerator<SDKMessage, void, unknown> {
+    // resolveMode has already reconciled model/effort compatibility, so the
+    // SDK options can take the values verbatim with a default-model fallback.
+    if (requestMode?.model || requestMode?.effort) {
+      this.logger.info("Applying request-mode override", { ...requestMode });
+    }
+
     // Configure the Claude SDK options. We no longer bypass the built-in
     // permission checks because we want our `allowedTools` list (defined
     // below) to be fully enforced by the runtime.
     const options: any = {
       outputFormat: "stream-json",
       // Configure the Claude model to use
-      model: config.anthropic.model,
+      model: requestMode?.model || config.anthropic.model,
       // Disable verbose SDK logging
       verbose: false,
       logLevel: "error", // Only log errors, not debug/info
@@ -199,6 +209,7 @@ export class ClaudeHandler {
       // such as `mcp_github_create_pull_request` which are not explicitly
       // allowlisted in `specificAllowedMcpTools`.
     };
+    if (requestMode?.effort) options.effort = requestMode.effort;
 
     // Set up system prompt if provided
     // Using the preset to extend Claude Code's default system prompt with our instructions
@@ -232,6 +243,7 @@ export class ClaudeHandler {
           channelType: slackContext.channelType,
           threadTs: slackContext.threadTs,
           messageTs: slackContext.messageTs || "",
+          messageText: slackContext.messageText,
         };
         const actionServers =
           await this.approvableActionRegistry.createMcpServerConfig(

@@ -108,6 +108,99 @@ export class ApprovableActionRegistry {
       };
     }
 
+    // ---- YOLO-emoji bypass ----
+    // If the action declares yoloEmojis and the user's message contains one
+    // of them, skip the confirmation dialog and execute immediately. We post
+    // a placeholder message in-thread so action.execute() has a Slack message
+    // to update in-place with the final result (JIRA ticket link, PR link).
+    const matchedYoloEmoji = action.yoloEmojis?.find(e =>
+      ctx.messageText?.includes(e),
+    );
+    if (matchedYoloEmoji) {
+      this.logger.info("YOLO bypass triggered", {
+        actionName,
+        emoji: matchedYoloEmoji,
+        userId: ctx.userId.slice(-3),
+        channel: ctx.channel.slice(-4),
+      });
+
+      const threadTs = ctx.threadTs || ctx.messageTs;
+      let confirmationMessageTs: string | undefined;
+      try {
+        const posted = await this.app.client.chat.postMessage({
+          channel: ctx.channel,
+          thread_ts: threadTs,
+          text: `🚀 YOLO mode (${matchedYoloEmoji}) — executing \`${actionName}\`...`,
+        });
+        confirmationMessageTs = posted.ts;
+      } catch (postErr) {
+        this.logger.warn("Failed to post YOLO placeholder message", postErr);
+      }
+
+      const deps: ActionDependencies = {
+        app: this.app,
+        reactionManager: this.reactionManager,
+        confirmationMessageTs,
+      };
+
+      try {
+        await action.execute(params, ctx, deps);
+      } catch (error) {
+        this.logger.error("YOLO action execute failed", {
+          actionName,
+          error,
+        });
+        const errMessage =
+          error instanceof Error ? error.message : String(error);
+
+        if (confirmationMessageTs) {
+          try {
+            await this.app.client.chat.update({
+              channel: ctx.channel,
+              ts: confirmationMessageTs,
+              text: `❌ YOLO action "${actionName}" failed`,
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text:
+                      `❌ *YOLO action \`${actionName}\` failed*\n` +
+                      `\`\`\`\n${errMessage.slice(0, 1500)}\n\`\`\``,
+                  },
+                },
+              ],
+            });
+          } catch (updateErr) {
+            this.logger.warn(
+              "Failed to update YOLO message with error",
+              updateErr,
+            );
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Action "${actionName}" was auto-approved via ${matchedYoloEmoji} but execution FAILED: ${errMessage}. Do not call this tool again for the same request. Do not send any additional text response to the user — the failure has already been reported to the thread.`,
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Action "${actionName}" was auto-approved via ${matchedYoloEmoji} and has been executed. Do not call this tool again for the same request. Do not send any additional text response to the user.`,
+          },
+        ],
+      };
+    }
+
+    // ---- Normal confirmation flow ----
+
     const sessionKey = `action-${actionName}-${ctx.userId}-${ctx.channel}-${Date.now()}`;
 
     // Don't register reactions on the original user message here — the main
@@ -197,6 +290,14 @@ export class ApprovableActionRegistry {
    * Slack app. Call this once at startup.
    */
   setupButtonHandlers(): void {
+    // Let each action register its own block_action listeners (e.g. the
+    // per-check Fix buttons that the CI status section renders). Called
+    // once at startup so config-side modules don't need access to `app`
+    // from index.ts.
+    for (const action of this.actions.values()) {
+      action.setupActionHandlers?.(this.app);
+    }
+
     // ---- Approve ----
     this.app.action("approve_action", async ({ ack, body }: any) => {
       await ack();
@@ -222,6 +323,7 @@ export class ApprovableActionRegistry {
         app: this.app,
         reactionManager: this.reactionManager,
         confirmationMessageTs: confirmTs,
+        formState: body.state?.values,
       };
 
       const msgId = generateMessageId(

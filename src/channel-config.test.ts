@@ -13,7 +13,7 @@ jest.mock("./config", () => ({
 jest.mock("fs", () => ({
   readFileSync: jest.fn().mockReturnValue(
     JSON.stringify({
-      contextSources: [],
+      channelSettings: [],
       conditionalReplyChannels: [],
       ephemeralChannelConfig: {},
       dmNotificationConfig: {},
@@ -22,7 +22,7 @@ jest.mock("fs", () => ({
 }));
 jest.mock("js-yaml", () => ({
   load: jest.fn().mockReturnValue({
-    contextSources: [],
+    channelSettings: [],
     conditionalReplyChannels: [],
     ephemeralChannelConfig: {},
     dmNotificationConfig: {},
