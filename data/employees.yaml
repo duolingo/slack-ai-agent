@@ -1,0 +1,24 @@
+# Employee directory — keyed by Slack user ID
+# This file contains real employee data and is git-ignored.
+# See data/example-employees.yaml for the template.
+#
+# role: must match a key in config/tool-allowlist.yaml (e.g. member, engineer, privilegedEngineer)
+# Employees without a role field are locked out (treated as "none").
+
+U0B5R0WM0KH:
+  email: "george.malone@duolingo.com"
+  firstName: "George"
+  lastName: "Malone"
+  github: "GeorgeHMalone"
+  role: "engineer"
+  location: "Pittsburgh"
+  tzName: "US/Eastern"
+
+U0B5R0WM0KI:
+  email: "george.yao@duolingo.com"
+  firstName: "George"
+  lastName: "Yao"
+  github: "georgeyao-duolingo"
+  role: "engineer"
+  location: "Pittsburgh"
+  tzName: "US/Eastern"

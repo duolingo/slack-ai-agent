@@ -35,6 +35,7 @@ config/subagents/*.yaml
 # Employee data (PII)
 data/*
 !data/example-*.yaml
+!data/employees.yaml
 
 # Logs
 *.log
