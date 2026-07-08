@@ -1,8 +1,11 @@
+import { join } from "path";
 import type { App } from "@slack/bolt";
-import type { ReactionManager } from "../reaction-manager";
+import { REACTIONS, type ReactionManager } from "../reaction-manager";
 import { Logger } from "../logger";
 import { generateMessageId } from "../tracking";
 import { withMessageId } from "../logger";
+import { config } from "../config";
+import { PersistentMap } from "../persistent-map";
 import type {
   ApprovableAction,
   ActionSlackContext,
@@ -25,9 +28,10 @@ export class ApprovableActionRegistry {
   private app: App;
   private reactionManager: ReactionManager;
   private actions = new Map<string, ApprovableAction<any>>();
-  private pendingSessions = new Map<string, PendingActionSession>();
+  private pendingSessions = new PersistentMap<PendingActionSession>(
+    join(config.persistDir, "pending-sessions.json"),
+  );
   private logger = new Logger("ApprovableActionRegistry");
-  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(app: App, reactionManager: ReactionManager) {
     this.app = app;
@@ -91,6 +95,45 @@ export class ApprovableActionRegistry {
   }
 
   // ------------------------------------------------------------------
+  // Reaction lifecycle (original user message)
+  // ------------------------------------------------------------------
+
+  /**
+   * Set the lifecycle reaction on the original user message for an approvable
+   * action (waiting-on-human → complete / error). Routed through the
+   * session-tracked updateReaction so the reaction state stays consistent
+   * across the whole lifecycle — including the later approve/cancel, which the
+   * reaction session outlives (SlackHandler keeps it ~12h).
+   */
+  private async setActionReaction(
+    ctx: ActionSlackContext,
+    emoji: string,
+  ): Promise<void> {
+    if (ctx.reactionKey) {
+      await this.reactionManager.updateReaction(ctx.reactionKey, emoji);
+    }
+  }
+
+  /**
+   * Run a confirmation-flow step; if it throws (e.g. buildConfirmationBlocks or
+   * Slack postMessage fails) mark the original message ERROR before rethrowing.
+   * Without this the turn stays stuck on the tool-use reaction, since
+   * sendResponse cedes the reaction once an approvable action is invoked.
+   */
+  private async runConfirmationStep<T>(
+    ctx: ActionSlackContext,
+    step: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      this.logger.error("Confirmation flow step failed", error);
+      await this.setActionReaction(ctx, REACTIONS.ERROR);
+      throw error;
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Tool call handler (posts confirmation dialog)
   // ------------------------------------------------------------------
 
@@ -120,8 +163,8 @@ export class ApprovableActionRegistry {
       this.logger.info("YOLO bypass triggered", {
         actionName,
         emoji: matchedYoloEmoji,
-        userId: ctx.userId.slice(-3),
-        channel: ctx.channel.slice(-4),
+        userId: ctx.userId,
+        channel: ctx.channel,
       });
 
       const threadTs = ctx.threadTs || ctx.messageTs;
@@ -179,6 +222,8 @@ export class ApprovableActionRegistry {
           }
         }
 
+        await this.setActionReaction(ctx, REACTIONS.ERROR);
+
         return {
           content: [
             {
@@ -188,6 +233,8 @@ export class ApprovableActionRegistry {
           ],
         };
       }
+
+      await this.setActionReaction(ctx, REACTIONS.COMPLETE);
 
       return {
         content: [
@@ -208,9 +255,8 @@ export class ApprovableActionRegistry {
     // confirmation dialog itself communicates "waiting for approval."
 
     // Build confirmation blocks from the action
-    const confirmationBlocks = await action.buildConfirmationBlocks(
-      params,
-      ctx,
+    const confirmationBlocks = await this.runConfirmationStep(ctx, () =>
+      action.buildConfirmationBlocks(params, ctx),
     );
 
     // Add approve/cancel buttons
@@ -248,12 +294,14 @@ export class ApprovableActionRegistry {
 
     // Post the confirmation dialog
     const threadTs = ctx.threadTs || ctx.messageTs;
-    const response = await this.app.client.chat.postMessage({
-      channel: ctx.channel,
-      text: `Confirm: ${actionName}`,
-      blocks,
-      thread_ts: threadTs,
-    });
+    const response = await this.runConfirmationStep<{ ts?: string }>(ctx, () =>
+      this.app.client.chat.postMessage({
+        channel: ctx.channel,
+        text: `Confirm: ${actionName}`,
+        blocks,
+        thread_ts: threadTs,
+      }),
+    );
 
     // Store session
     this.pendingSessions.set(sessionKey, {
@@ -267,9 +315,14 @@ export class ApprovableActionRegistry {
     this.logger.info("Posted confirmation dialog", {
       actionName,
       sessionKey,
-      userId: ctx.userId.slice(-3),
-      channel: ctx.channel.slice(-4),
+      userId: ctx.userId,
+      channel: ctx.channel,
     });
+
+    // The bot is now waiting on a human to approve/cancel — reflect that on the
+    // original message. The registry owns this reaction until the action
+    // resolves (sendResponse defers for approvable actions).
+    await this.setActionReaction(ctx, REACTIONS.WAITING_ON_HUMAN);
 
     return {
       content: [
@@ -336,6 +389,7 @@ export class ApprovableActionRegistry {
         const action = this.actions.get(actionName);
         if (!action) {
           this.logger.error("Action not found for approve", { actionName });
+          await this.setActionReaction(session.ctx, REACTIONS.ERROR);
           return;
         }
 
@@ -362,7 +416,24 @@ export class ApprovableActionRegistry {
         }
 
         try {
-          await action.execute(session.params, session.ctx, deps);
+          // Workflow/bot-triggered sessions carry a synthetic userId (the
+          // original event had no human user). A human approval gives us a
+          // real identity, so attribute the action to the approver AND drop
+          // the workflow/bot markers — that way the approver is treated like
+          // any normal user (resolve their real email, or surface the same
+          // error a user would get) instead of silently falling back to the
+          // service email.
+          const execCtx =
+            session.ctx.botId || session.ctx.workflowId
+              ? {
+                  ...session.ctx,
+                  userId: body.user?.id || session.ctx.userId,
+                  workflowId: undefined,
+                  botId: undefined,
+                }
+              : session.ctx;
+          await action.execute(session.params, execCtx, deps);
+          await this.setActionReaction(session.ctx, REACTIONS.COMPLETE);
         } catch (error) {
           this.logger.error("Action execute failed", { actionName, error });
 
@@ -394,6 +465,8 @@ export class ApprovableActionRegistry {
               );
             }
           }
+
+          await this.setActionReaction(session.ctx, REACTIONS.ERROR);
         }
       });
     });
@@ -459,6 +532,8 @@ export class ApprovableActionRegistry {
             this.logger.error("Failed to update cancel message", updateErr);
           }
         }
+
+        await this.setActionReaction(session.ctx, REACTIONS.ERROR);
       });
     });
   }
@@ -467,12 +542,14 @@ export class ApprovableActionRegistry {
   // Session cleanup
   // ------------------------------------------------------------------
 
-  /** Start periodic cleanup of stale sessions (older than 1 hour). */
+  /** Periodically purge sessions older than 7 days to prevent the
+   *  persisted file from growing unbounded. */
   startSessionCleanup(): void {
-    this.cleanupInterval = setInterval(() => {
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    setInterval(() => {
       const now = Date.now();
       for (const [key, session] of this.pendingSessions.entries()) {
-        if (now - session.createdAt.getTime() > 60 * 60 * 1000) {
+        if (now - session.createdAt.getTime() > SEVEN_DAYS_MS) {
           this.pendingSessions.delete(key);
         }
       }

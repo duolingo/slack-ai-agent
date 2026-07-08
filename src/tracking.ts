@@ -6,6 +6,7 @@ import {
 } from "./constants";
 import { config } from "./config";
 import { SlackChannelType } from "./types";
+import { ChannelConfigManager } from "./channel-config";
 import { HttpEventHandler } from "./http-event-handler";
 import {
   EventHandler,
@@ -29,6 +30,7 @@ const logger = new Logger("Tracking");
 
 // Slack App reference (set during init)
 let slackApp: App | null = null;
+let channelConfigManager: ChannelConfigManager | null = null;
 
 // Cache for channel privacy lookups
 const channelPrivacyCache = new Map<
@@ -37,8 +39,14 @@ const channelPrivacyCache = new Map<
 >();
 
 /** Initialize tracking with Slack App for channel privacy checks */
-export const initTracking = (app: App): void => {
+export const initTracking = (
+  app: App,
+  configManager?: ChannelConfigManager,
+): void => {
   slackApp = app;
+  if (configManager) {
+    channelConfigManager = configManager;
+  }
 };
 
 /** Check if full content logging is allowed (public channel or allowlisted) */
@@ -47,6 +55,11 @@ export const isFullContentLoggingAllowed = async (
   channelType: SlackChannelType,
 ): Promise<boolean> => {
   if (!channelId) return false;
+  if (channelConfigManager) {
+    const allowlist =
+      await channelConfigManager.getFullContentLoggingAllowlist();
+    if (allowlist.has(channelId)) return true;
+  }
   if (channelType === "im") return false; // DMs = private
   if (!slackApp) {
     logger.warn(
@@ -86,6 +99,7 @@ export class ConsoleEventHandler implements EventHandler {
       ms: params.latencyMs,
       inputTokens: params.inputTokens,
       outputTokens: params.outputTokens,
+      costUsd: params.costUsd,
       toolCalls: params.toolCalls?.length ?? 0,
     });
 

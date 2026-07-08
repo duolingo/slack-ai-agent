@@ -14,6 +14,14 @@ export interface ActionSlackContext {
   messageTs: string;
   /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
   messageText?: string;
+  workflowId?: string;
+  botId?: string;
+  /** SlackHandler reaction key. Only set when bot lifecycle reactions are
+   *  enabled, so the registry can update the original message's reaction
+   *  through the session path while the turn is live (before cleanup). */
+  reactionKey?: string;
+  /** Per-thread agent workspace for temp files the action subprocess reads. */
+  workingDirectory?: string;
 }
 
 /**

@@ -1,15 +1,60 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ConversationSession, SlackContext } from "./types";
 import { Logger } from "./logger";
-import { McpManager } from "./mcp-manager";
-import { config } from "./config";
+import { bindUserToMcpServers, McpManager } from "./mcp-manager";
+import {
+  config,
+  provisionThreadWorkspace,
+  destroyThreadWorkspace,
+  buildSandboxFilesystem,
+  SANDBOX_NETWORK,
+} from "./config";
 import { UserUtils } from "./user-utils";
 import { loadSubagentDefinitions } from "./validation-agent";
 import type { ApprovableActionRegistry } from "./approvable-actions";
-import { RequestMode } from "./request-mode";
+import { OPUS_MODEL, RequestMode, SONNET_MODEL } from "./request-mode";
+import { OpusHealthMonitor } from "./opus-health";
 
-/** Default max age for inactive session cleanup (30 minutes). */
-export const DEFAULT_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+/** Default max age for inactive session cleanup (16 hours). */
+export const DEFAULT_SESSION_MAX_AGE_MS = 16 * 60 * 60 * 1000;
+
+const ALLOWED_ENV_VARS = new Set([
+  "PATH",
+  "HOME",
+  "ANTHROPIC_API_KEY",
+  // AWS CLI auth for local testing (duo sso session creds).
+  // In prod, credentials come from the EC2 instance profile via IMDS.
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_PROFILE",
+  // GCP/BQ CLI auth — bq reads creds from ~/.config/gcloud/ by default.
+  // CLOUDSDK_CONFIG overrides the config dir; GOOGLE_APPLICATION_CREDENTIALS
+  // points to a service account key file.
+  "CLOUDSDK_CONFIG",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  // Per-call MCP tool timeout (ms). Defaults to 60s, which is too short for
+  // synchronous data-ai analyses; raise it via the environment.
+  "MCP_TOOL_TIMEOUT",
+]);
+
+/**
+ * Build a sanitized env for the Claude subprocess.
+ *
+ * Only PATH, HOME, and ANTHROPIC_API_KEY are passed. MCP server tokens
+ * are no longer needed in the subprocess env because mcp-servers.json is
+ * pre-resolved with literal values by scripts/resolve-mcp-config.sh.
+ */
+export const buildSanitizedEnv = (): Record<string, string | undefined> => {
+  const sanitized: Record<string, string | undefined> = {};
+  for (const key of ALLOWED_ENV_VARS) {
+    if (key in process.env) {
+      sanitized[key] = process.env[key];
+    }
+  }
+  return sanitized;
+};
 
 /**
  * Determine whether approvable actions should be injected for a given Slack context.
@@ -44,6 +89,7 @@ export class ClaudeHandler {
   private logger = new Logger("ClaudeHandler");
   private mcpManager: McpManager;
   private approvableActionRegistry?: ApprovableActionRegistry;
+  private opusHealthMonitor: OpusHealthMonitor;
   private retryOptions: RetryOptions = {
     maxRetries: 3, // Reduced retry attempts for faster failure detection
     initialDelayMs: 2000, // 2 seconds - more time for process cleanup
@@ -53,9 +99,11 @@ export class ClaudeHandler {
   constructor(
     mcpManager: McpManager,
     approvableActionRegistry?: ApprovableActionRegistry,
+    opusHealthMonitor: OpusHealthMonitor = new OpusHealthMonitor(),
   ) {
     this.mcpManager = mcpManager;
     this.approvableActionRegistry = approvableActionRegistry;
+    this.opusHealthMonitor = opusHealthMonitor;
   }
 
   getSessionKey(userId: string, channelId: string, threadTs?: string): string {
@@ -75,13 +123,16 @@ export class ClaudeHandler {
     channelId: string,
     threadTs?: string,
   ): ConversationSession {
+    const sessionKey = this.getSessionKey(userId, channelId, threadTs);
+    const workingDirectory = provisionThreadWorkspace(sessionKey);
     const session: ConversationSession = {
       userId,
       channelId,
       threadTs,
+      workingDirectory,
       lastActivity: new Date(),
     };
-    this.sessions.set(this.getSessionKey(userId, channelId, threadTs), session);
+    this.sessions.set(sessionKey, session);
     return session;
   }
 
@@ -184,25 +235,43 @@ export class ClaudeHandler {
   ): AsyncGenerator<SDKMessage, void, unknown> {
     // resolveMode has already reconciled model/effort compatibility, so the
     // SDK options can take the values verbatim with a default-model fallback.
-    if (requestMode?.model || requestMode?.effort) {
+    if (requestMode?.model || requestMode?.effort || requestMode?.fast) {
       this.logger.info("Applying request-mode override", { ...requestMode });
     }
 
     // Configure the Claude SDK options. We no longer bypass the built-in
     // permission checks because we want our `allowedTools` list (defined
     // below) to be fully enforced by the runtime.
+    const primaryModel = requestMode?.model || config.anthropic.model;
+    const cwd = workingDirectory ?? config.baseDirectory;
     const options: any = {
       outputFormat: "stream-json",
       // Configure the Claude model to use
-      model: requestMode?.model || config.anthropic.model,
+      model: primaryModel,
       // Disable verbose SDK logging
       verbose: false,
       logLevel: "error", // Only log errors, not debug/info
-      // Enable skill discovery from .claude/skills/ directory
-      // Skills are available via symlink in the baseDirectory
+      // Sanitize the subprocess environment so Claude sessions cannot
+      // discover application secrets. MCP tokens are pre-resolved into
+      // mcp-servers.json by scripts/resolve-mcp-config.sh and don't need
+      // to be in the subprocess env.
+      env: buildSanitizedEnv(),
+      // Enable skill discovery from .claude/skills/ in the thread workspace
       settingSources: ["project", "user"],
       // Maximum number of agentic turns before stopping
       maxTurns: 120,
+      // Sandbox Bash commands so they cannot read the repo dir (which
+      // contains mcp-servers.json with resolved secrets) or other
+      // sensitive paths under $HOME. Read/Edit/Write tools are NOT
+      // sandboxed by this — they go through the permission system — but
+      // the allowedTools list already restricts those.
+      sandbox: {
+        enabled: true,
+        autoAllowBashIfSandboxed: true,
+        allowUnsandboxedCommands: false,
+        filesystem: buildSandboxFilesystem(cwd),
+        network: SANDBOX_NETWORK,
+      },
       // NOTE: `permissionMode: "bypassPermissions"` has been removed so that
       // the SDK's own permission gate respects the `allowedTools` list we
       // supply further down. This prevents the assistant from calling tools
@@ -210,6 +279,21 @@ export class ClaudeHandler {
       // allowlisted in `specificAllowedMcpTools`.
     };
     if (requestMode?.effort) options.effort = requestMode.effort;
+    // Opus fast mode (faster output, same model). Goes through the SDK's
+    // "flag settings" layer via `settings` rather than a top-level option.
+    if (requestMode?.fast) {
+      options.settings = { ...(options.settings ?? {}), fastMode: true };
+    }
+
+    // When the primary model is Opus, let the SDK transparently fall back to
+    // Sonnet if Opus is overloaded or unavailable. The SDK re-tries the primary
+    // at the start of each user turn, so a temporary outage doesn't permanently
+    // demote the session. The OpusHealthMonitor (below) reports when this
+    // fallback is actually happening so ops has visibility.
+    const isOpusRequest = primaryModel === OPUS_MODEL;
+    if (isOpusRequest) {
+      options.fallbackModel = SONNET_MODEL;
+    }
 
     // Set up system prompt if provided
     // Using the preset to extend Claude Code's default system prompt with our instructions
@@ -221,14 +305,34 @@ export class ClaudeHandler {
       };
     }
 
-    if (workingDirectory) {
-      options.cwd = workingDirectory;
-    }
+    options.cwd = cwd;
 
     // Add MCP server configuration if available
     const mcpServers = this.mcpManager.getServerConfiguration();
     if (mcpServers && Object.keys(mcpServers).length > 0) {
-      options.mcpServers = { ...mcpServers };
+      // Identity-bound servers (config `userEmailHeader`) receive the
+      // requesting user's email as a trusted per-request header; without a
+      // resolvable human requester they are omitted for this request (fail
+      // closed). Bot/workflow-triggered messages have no `event.user`, so
+      // they never reach identity-bound servers.
+      let requesterEmail: string | undefined;
+      if (slackContext?.user) {
+        const employee = await UserUtils.getEmployeeBySlackId(
+          slackContext.user,
+        );
+        requesterEmail = employee?.email?.trim() || undefined;
+      }
+      const { servers, omitted } = bindUserToMcpServers(
+        mcpServers,
+        requesterEmail,
+      );
+      if (omitted.length > 0) {
+        this.logger.debug(
+          "Omitted identity-bound MCP servers: no resolvable requester email",
+          { omitted, userId: slackContext?.user },
+        );
+      }
+      options.mcpServers = servers;
     }
 
     if (
@@ -238,12 +342,25 @@ export class ClaudeHandler {
     ) {
       try {
         const actionSlackCtx = {
-          userId: slackContext.user,
+          // Workflow/bot-triggered messages have no `event.user`, so
+          // `slackContext.user` is undefined. Fall back to the bot/workflow
+          // identifier (or a literal) so downstream actions never crash on
+          // `ctx.userId.slice(...)` / username sanitization. The Approve
+          // handler later swaps in the human approver's id (see registry.ts).
+          userId:
+            slackContext.user ||
+            slackContext.botId ||
+            slackContext.workflowId ||
+            "slack-workflow",
           channel: slackContext.channel,
           channelType: slackContext.channelType,
           threadTs: slackContext.threadTs,
           messageTs: slackContext.messageTs || "",
           messageText: slackContext.messageText,
+          workflowId: slackContext.workflowId,
+          botId: slackContext.botId,
+          reactionKey: slackContext.reactionKey,
+          workingDirectory: slackContext.workingDirectory,
         };
         const actionServers =
           await this.approvableActionRegistry.createMcpServerConfig(
@@ -271,15 +388,15 @@ export class ClaudeHandler {
     if (isBotOrWorkflow) {
       role = (await this.mcpManager.getHighestRole()) || "none";
       this.logger.debug("User role determined (bot/workflow)", {
-        userId: slackContext?.user?.slice(-4),
-        botId: slackContext?.botId?.slice(-4),
+        userId: slackContext?.user,
+        botId: slackContext?.botId,
         workflowId: slackContext?.workflowId,
         role,
       });
     } else if (slackContext?.user) {
       role = await UserUtils.getUserRole(slackContext.user);
       this.logger.debug("User role determined", {
-        userId: slackContext.user.slice(-4),
+        userId: slackContext.user,
         role,
       });
     }
@@ -329,6 +446,12 @@ export class ClaudeHandler {
 
     try {
       for await (const message of generator) {
+        // Watch for capacity signals so ops is alerted when Opus is falling
+        // back to Sonnet. Only meaningful when this request actually targeted
+        // Opus as its primary model.
+        if (isOpusRequest) {
+          this.opusHealthMonitor.observe(message);
+        }
         if (message.type === "system" && message.subtype === "init") {
           if (session) {
             session.sessionId = message.session_id;
@@ -359,6 +482,7 @@ export class ClaudeHandler {
     for (const [key, session] of this.sessions.entries()) {
       if (now - session.lastActivity.getTime() > maxAge) {
         this.sessions.delete(key);
+        destroyThreadWorkspace(key);
       }
     }
   }

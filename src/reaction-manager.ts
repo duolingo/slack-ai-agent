@@ -13,6 +13,7 @@ interface ReactionConfig {
   TOOL_USE: string;
   COMPLETE: string;
   SKIPPED: string;
+  WAITING_ON_HUMAN: string;
   ERROR: string;
   SUPPRESSION_EMOJIS: string[];
 }
@@ -36,6 +37,7 @@ export const REACTIONS = {
   TOOL_USE: reactionConfig.TOOL_USE,
   COMPLETE: reactionConfig.COMPLETE,
   SKIPPED: reactionConfig.SKIPPED,
+  WAITING_ON_HUMAN: reactionConfig.WAITING_ON_HUMAN,
   ERROR: reactionConfig.ERROR,
   /** Slack shortcodes that suppress bot replies (with colons added). */
   SUPPRESSION_EMOJIS: reactionConfig.SUPPRESSION_EMOJIS.map(

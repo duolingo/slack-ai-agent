@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import { OPUS_MODEL } from "./request-mode";
 
 dotenv.config();
 
@@ -13,11 +14,13 @@ function getRequiredEnv(key: string): string {
 }
 
 // The Claude Agent SDK's working directory lives under /tmp so the agent
-// never reads from or writes to the application directory.  We copy
-// .claude/ and data/ into it so skills, settings, and employee data are
-// physically inside the sandbox (symlinks get resolved to the real path
-// which is outside the sandbox, causing security blocks on grep/Read/Glob).
-const BASE_DIR = "/tmp/slack-ai-agent";
+// never reads from or writes to the application directory.  Each Slack
+// thread gets its own subdirectory under workspaces/ with copies of
+// .claude/ and data/ physically inside the sandbox (symlinks get resolved
+// to the real path which is outside the sandbox, causing security blocks
+// on grep/Read/Glob).
+export const SANDBOX_ROOT = "/tmp/slack-ai-agent";
+const WORKSPACES_DIR = path.join(SANDBOX_ROOT, "workspaces");
 
 /** Replace dest with a fresh copy of source. Copies to a temp dir first
  *  so the sandbox keeps its old copy if the source read fails. */
@@ -30,37 +33,83 @@ function copyDirIntoSandbox(source: string, dest: string): void {
   fs.renameSync(tmp, dest);
 }
 
-// How often to re-sync data/ from source so the sandbox stays current.
+// How often to re-sync data/ from source so thread workspaces stay current.
 const DATA_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
-function ensureBaseDirectory(): string {
-  fs.mkdirSync(BASE_DIR, { recursive: true });
-
-  // Copy .claude/ so skills and project settings are discovered.
-  copyDirIntoSandbox(path.resolve(".claude"), path.join(BASE_DIR, ".claude"));
-
-  // Copy data/ so the agent and sub-agents can read employees.yaml.
-  // Non-fatal: if an external sync job is rotating the file at this moment,
-  // cpSync can hit ENOENT. The periodic refresh will pick it up later.
-  try {
-    copyDirIntoSandbox(path.resolve("data"), path.join(BASE_DIR, "data"));
-  } catch {
-    // Bot can start without employee data — users are treated as non-employee.
-  }
-
-  // Re-sync data/ periodically so the sandbox copy of employees.yaml stays
-  // current as external sync jobs update the source file.
-  // .unref() prevents the interval from blocking process exit.
-  setInterval(() => {
+function refreshAllWorkspaceData(): void {
+  if (!fs.existsSync(WORKSPACES_DIR)) return;
+  for (const name of fs.readdirSync(WORKSPACES_DIR)) {
+    const workspace = path.join(WORKSPACES_DIR, name);
     try {
-      copyDirIntoSandbox(path.resolve("data"), path.join(BASE_DIR, "data"));
+      if (!fs.statSync(workspace).isDirectory()) continue;
+      copyDirIntoSandbox(path.resolve("data"), path.join(workspace, "data"));
     } catch {
-      // Non-fatal — sandbox keeps its previous copy until the next sync.
+      // Non-fatal — workspace keeps its previous copy until the next sync.
     }
-  }, DATA_REFRESH_INTERVAL_MS).unref();
-
-  return BASE_DIR;
+  }
 }
+
+function ensureSandboxRoot(): string {
+  fs.mkdirSync(WORKSPACES_DIR, { recursive: true });
+
+  // Re-sync data/ in every active thread workspace periodically so
+  // employees.yaml stays current as external sync jobs update the source.
+  // .unref() prevents the interval from blocking process exit.
+  setInterval(refreshAllWorkspaceData, DATA_REFRESH_INTERVAL_MS).unref();
+
+  return SANDBOX_ROOT;
+}
+
+/** Create or refresh the per-thread agent workspace for a Slack session. */
+export function provisionThreadWorkspace(sessionKey: string): string {
+  const workspace = path.join(WORKSPACES_DIR, sessionKey);
+  fs.mkdirSync(workspace, { recursive: true });
+  copyDirIntoSandbox(path.resolve(".claude"), path.join(workspace, ".claude"));
+  try {
+    copyDirIntoSandbox(path.resolve("data"), path.join(workspace, "data"));
+  } catch {
+    // Bot can serve the thread without employee data — users are non-employee.
+  }
+  return workspace;
+}
+
+/** Remove a thread workspace when its session is evicted. */
+export function destroyThreadWorkspace(sessionKey: string): void {
+  fs.rmSync(path.join(WORKSPACES_DIR, sessionKey), {
+    recursive: true,
+    force: true,
+  });
+}
+
+/**
+ * Filesystem rules for the Bash sandbox.
+ *
+ * Denies reading $HOME (where the repo and resolved mcp-servers.json secrets
+ * live) and carves out ~/.config/gcloud for bq CLI auth. That dir must be
+ * both readable and writable because bq rewrites its OAuth token cache on
+ * every access-token refresh.
+ */
+const SANDBOX_FILESYSTEM_RULES = {
+  denyRead: ["~/"],
+  allowRead: [".", "~/.config/gcloud"],
+} as const;
+
+/** Bash sandbox filesystem rules scoped to a thread workspace cwd. */
+export const buildSandboxFilesystem = (workingDirectory: string) => ({
+  ...SANDBOX_FILESYSTEM_RULES,
+  allowWrite: [workingDirectory, "~/.config/gcloud"],
+});
+
+/** Default rules for tests; allowWrite covers the whole sandbox root. */
+export const SANDBOX_FILESYSTEM = buildSandboxFilesystem(SANDBOX_ROOT);
+
+/**
+ * Network rules for the Bash sandbox. Adds the Google Cloud and AWS endpoints
+ * the data-skill CLIs need on top of the SDK's managed domains.
+ */
+export const SANDBOX_NETWORK = {
+  allowedDomains: ["*.googleapis.com", "*.amazonaws.com", "169.254.169.254"],
+};
 
 export const config = {
   slack: {
@@ -70,10 +119,17 @@ export const config = {
   },
   anthropic: {
     apiKey: getRequiredEnv("ANTHROPIC_API_KEY"),
-    model: "claude-opus-4-7", // Claude 4.7 Opus - most capable model
+    model: OPUS_MODEL, // Claude 4.8 Opus - most capable model
   },
   slackWorkspaceUrl: getRequiredEnv("SLACK_WORKSPACE_URL"),
+  // Optional Slack channel for operational alerts (e.g. model fallback). When
+  // unset, no ops notifications are sent. Set OPS_ALERT_CHANNEL_ID in the
+  // deployment environment to enable them.
+  opsAlertChannelId: process.env.OPS_ALERT_CHANNEL_ID || undefined,
   trackingClientId: process.env.TRACKING_CLIENT_ID || "slack-ai-agent",
-  baseDirectory: ensureBaseDirectory(),
+  baseDirectory: ensureSandboxRoot(),
+  // Persistent state that must survive process restarts (deploys).
+  // Defaults to a .persist/ directory in the app root — NOT under /tmp.
+  persistDir: process.env.PERSIST_DIR || path.resolve(".persist"),
   debug: process.env.DEBUG === "true" || process.env.NODE_ENV === "development",
 };

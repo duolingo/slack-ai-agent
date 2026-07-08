@@ -27,12 +27,16 @@ export type McpSSEServerConfig = {
   type: "sse";
   url: string;
   headers?: Record<string, string>;
+  /** See {@link bindUserToMcpServers}. Not passed through to the SDK. */
+  userEmailHeader?: string;
 };
 
 export type McpHttpServerConfig = {
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /** See {@link bindUserToMcpServers}. Not passed through to the SDK. */
+  userEmailHeader?: string;
 };
 
 export type McpServerConfig =
@@ -42,6 +46,64 @@ export type McpServerConfig =
 
 export interface McpConfiguration {
   mcpServers: Record<string, McpServerConfig>;
+}
+
+/**
+ * Bind the requesting user's identity to identity-aware MCP servers.
+ *
+ * A server config may declare `userEmailHeader` (e.g. "X-User-Email"). Such a
+ * server wants to know, per request, which human is asking — so it can pin
+ * lookups to the requester instead of trusting a model-supplied argument.
+ *
+ * For each server declaring `userEmailHeader`:
+ *   - with a resolved email: a copy of the config is returned with the email
+ *     injected under that header (and the marker field stripped, since the
+ *     SDK doesn't know it);
+ *   - without one (bot/workflow-triggered request, or the user isn't in the
+ *     employee directory): the server is OMITTED for this request. Fail
+ *     closed — an identity-bound server must never receive an anonymous
+ *     session the model could steer toward an arbitrary subject.
+ *
+ * Servers that don't declare `userEmailHeader` pass through unchanged. Input
+ * configs are never mutated (they're shared across requests via McpManager's
+ * cache).
+ */
+export function bindUserToMcpServers(
+  servers: Record<string, McpServerConfig>,
+  userEmail: string | undefined,
+): { servers: Record<string, McpServerConfig>; omitted: string[] } {
+  const bound: Record<string, McpServerConfig> = {};
+  const omitted: string[] = [];
+
+  for (const [name, config] of Object.entries(servers)) {
+    const headerName =
+      (config.type === "sse" || config.type === "http") &&
+      typeof config.userEmailHeader === "string"
+        ? config.userEmailHeader.trim()
+        : "";
+
+    if (!headerName) {
+      bound[name] = config;
+      continue;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { userEmailHeader, ...sdkConfig } = config as
+      | McpSSEServerConfig
+      | McpHttpServerConfig;
+
+    if (!userEmail) {
+      omitted.push(name);
+      continue;
+    }
+
+    bound[name] = {
+      ...sdkConfig,
+      headers: { ...sdkConfig.headers, [headerName]: userEmail },
+    };
+  }
+
+  return { servers: bound, omitted };
 }
 
 export class McpManager {

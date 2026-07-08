@@ -24,3 +24,6 @@ export const TOOL_RESPONSE_LOG_MAX_LENGTH = 300;
 export const INCOMING_MESSAGE_LOG_MAX_LENGTH = 300;
 export const RESPONSE_LOG_MAX_LENGTH = 1000;
 export const TRACKING_FIELD_MAX_LENGTH = 1000;
+// slack_bot_tool_calls is a Redshift VARCHAR(256) REPEATED column — each
+// array element, not just the whole array, must fit within 256 chars.
+export const TRACKING_TOOL_CALL_MAX_LENGTH = 256;

@@ -7,6 +7,7 @@ THINKING: thinking_face
 TOOL_USE: gear
 COMPLETE: white_check_mark
 SKIPPED: no_entry_sign
+WAITING_ON_HUMAN: hourglass_flowing_sand
 ERROR: x
 
 # Suppression emoji names — messages containing :<name>: are skipped.

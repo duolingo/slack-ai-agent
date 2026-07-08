@@ -23,6 +23,8 @@ export interface MessageProcessorResult {
   toolCallNames?: string[];
   tokenUsage?: TokenUsage;
   turnCount?: number;
+  /** Total Claude API cost (USD) for this message, from the SDK result message. */
+  costUsd?: number;
   phaseTimings?: PhaseTimings;
 }
 
@@ -105,6 +107,7 @@ export class MessageProcessor {
     const toolCallNames: string[] = [];
     let shouldNotRespond = false;
     let tokenUsage: TokenUsage | undefined;
+    let costUsd: number | undefined;
     let turnCount = 0;
     const timings: PhaseTimings = {};
 
@@ -213,6 +216,9 @@ export class MessageProcessor {
           };
         }
 
+        // The SDK reports the full agentic-loop cost on the result message.
+        costUsd = message.total_cost_usd;
+
         // Check for special responses in results too
         const resultText =
           (message as any).result || (message as any).message?.result;
@@ -249,6 +255,9 @@ export class MessageProcessor {
         completionLog.cacheCreationTokens = tokenUsage.cacheCreationInputTokens;
       }
     }
+    if (costUsd !== undefined) {
+      completionLog.costUsd = costUsd;
+    }
     this.logger.info("✅ Completed", completionLog);
 
     return {
@@ -258,6 +267,7 @@ export class MessageProcessor {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolCallNames: toolCallNames.length > 0 ? toolCallNames : undefined,
       tokenUsage,
+      costUsd,
       turnCount: turnCount > 0 ? turnCount : undefined,
       phaseTimings: timings,
     };

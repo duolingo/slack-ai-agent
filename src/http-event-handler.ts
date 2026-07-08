@@ -2,14 +2,17 @@ import axios from "axios";
 import { config } from "./config";
 import { SlackChannelType } from "./types";
 import { Logger } from "./logger";
-import { TRACKING_FIELD_MAX_LENGTH } from "./constants";
+import {
+  TRACKING_FIELD_MAX_LENGTH,
+  TRACKING_TOOL_CALL_MAX_LENGTH,
+} from "./constants";
 import {
   EventHandler,
   MessageProcessedEvent,
   FeedbackEvent,
   truncateText,
 } from "./tracking-types";
-import { UserUtils } from "./user-utils";
+import { UserUtils, redactChannelName } from "./user-utils";
 
 const logger = new Logger("Tracking");
 
@@ -74,16 +77,22 @@ export class HttpEventHandler implements EventHandler {
       slack_username: params.slackUsername,
       slack_handle: params.slackHandle,
       slack_channel: params.slackChannel,
-      slack_channel_name: params.slackChannelName,
+      slack_channel_name: redactChannelName(
+        params.slackChannelName,
+        params.slackChannelType,
+        includeContent,
+      ),
       slack_thread_ts: params.slackThreadTs,
       slack_message_link: params.slackMessageLink,
       slack_bot_question_length: params.slackAppQuestion.length,
       slack_bot_answer_length: params.slackAppAnswer.length,
       // Public channels get the full formatted tool calls (name + params);
       // DMs and private channels get names only, mirroring how we log things.
-      slack_bot_tool_calls: includeContent
+      // Each entry must fit the property's VARCHAR(256) Redshift column.
+      slack_bot_tool_calls: (includeContent
         ? params.toolCalls
-        : params.toolCallNames,
+        : params.toolCallNames
+      )?.map(call => truncateText(call, TRACKING_TOOL_CALL_MAX_LENGTH)),
       slack_bot_tool_calls_count: params.toolCalls
         ? params.toolCalls.length
         : 0,
@@ -92,7 +101,9 @@ export class HttpEventHandler implements EventHandler {
       output_tokens: params.outputTokens,
       cache_read_input_tokens: params.cacheReadInputTokens,
       cache_creation_input_tokens: params.cacheCreationInputTokens,
+      cost_usd: params.costUsd,
       turn_count: params.turnCount,
+      is_opus_fast_mode: params.isOpusFastMode,
     };
 
     // Serialize phase timings as an array of "name:duration_ms" strings to
@@ -136,11 +147,20 @@ export class HttpEventHandler implements EventHandler {
   async onFeedback(params: FeedbackEvent): Promise<void> {
     await this.base.onFeedback(params);
 
+    const includeContent = await this.checkContentLogging(
+      params.slackChannel,
+      params.slackChannelType,
+    );
+
     const properties: Properties = {
       slack_username: params.slackUsername,
       slack_handle: params.slackHandle,
       slack_channel: params.slackChannel,
-      slack_channel_name: params.slackChannelName,
+      slack_channel_name: redactChannelName(
+        params.slackChannelName,
+        params.slackChannelType,
+        includeContent,
+      ),
       slack_thread_ts: params.slackThreadTs,
       slack_message_link: params.slackMessageLink,
       upvote_status: params.upvoteStatus,

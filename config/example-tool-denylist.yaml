@@ -18,9 +18,8 @@ disallowed_tools:
   - mcp__github__create_branch
 
   # Slack write operations (bot posts via its own framework, not MCP)
-  - mcp__slack__slack_post_message
-  - mcp__slack__slack_reply_to_thread
-  - mcp__slack__slack_add_reaction
+  - mcp__slack__slack_send_message
+  - mcp__slack__slack_reply_in_thread
 
   # Git operations that write to the filesystem
   - "Bash(git clone:*)"
