@@ -45,8 +45,8 @@ Copy the example configs and customize for your workspace:
 #### Required
 
 | Example file                                      | Copy to                                   | Purpose                                                     |
-| ------------------------------------------------- | ----------------------------------------- | ----------------------------------------------------------- |
-| `config/example-reactions.yaml`                   | `config/reactions.yaml`                   | Emoji reactions for thinking, completion, errors            |
+| ------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| `config/example-emojis.yaml`                      | `config/emojis.yaml`                      | Emoji reactions for thinking, completion, errors            |
 | `config/example-tool-allowlist.yaml`              | `config/tool-allowlist.yaml`              | Role-based tool access control (key order = role hierarchy) |
 | `config/example-tool-denylist.yaml`               | `config/tool-denylist.yaml`               | Tools the bot must never use                                |
 | `config/instructions/example-general-context.txt` | `config/instructions/general-context.txt` | Base system prompt injected into every response             |
@@ -54,7 +54,7 @@ Copy the example configs and customize for your workspace:
 #### Optional
 
 | Example file                                             | Copy to                               | Purpose                                                                |
-| -------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| --------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------ |
 | `config/example-channels.yaml`                           | `config/channels.yaml`                | Channel auto-reply routing, keyword triggers, ephemeral summaries      |
 | `config/instructions/example-channel.txt`                | `config/instructions/<name>.txt`      | Channel-specific system prompt context (referenced by `channels.yaml`) |
 | `config/subagents/example-subagents.yaml`                | `config/subagents/<name>.yaml`        | Sub-agents for validation or post-processing                           |
@@ -66,7 +66,7 @@ Quick start:
 
 ```bash
 cp .env.example .env
-cp config/example-reactions.yaml config/reactions.yaml
+cp config/example-emojis.yaml config/emojis.yaml
 cp config/example-tool-allowlist.yaml config/tool-allowlist.yaml
 cp config/example-tool-denylist.yaml config/tool-denylist.yaml
 cp config/instructions/example-general-context.txt config/instructions/general-context.txt
