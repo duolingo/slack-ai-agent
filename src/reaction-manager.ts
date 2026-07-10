@@ -25,10 +25,14 @@ interface ReactionConfig {
 }
 
 function loadReactionConfig(): ReactionConfig {
-  const configPath = path.resolve("config/emojis.yaml");
+  const emojisPath = path.resolve("config/emojis.yaml");
+  const legacyPath = path.resolve("config/reactions.yaml");
+  // Fall back to the pre-rename filename so deployments that haven't renamed
+  // their config file yet don't crash on startup.
+  const configPath = fs.existsSync(emojisPath) ? emojisPath : legacyPath;
   const content = fs.readFileSync(configPath, "utf-8");
   const config = yaml.load(content) as ReactionConfig;
-  logger.info("Loaded emoji config");
+  logger.info("Loaded emoji config", { path: configPath });
   return config;
 }
 
