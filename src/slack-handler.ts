@@ -1,11 +1,14 @@
 import { App } from "@slack/bolt";
 import { ClaudeHandler } from "./claude-handler";
 import { FileHandler, ProcessedFile } from "./file-handler";
-import { McpManager } from "./mcp-manager";
 import { Logger, withMessageId, truncateForLog } from "./logger";
 import { config } from "./config";
 import { ChannelConfigManager } from "./channel-config";
-import { ReactionManager, REACTIONS } from "./reaction-manager";
+import {
+  ReactionManager,
+  REACTIONS,
+  MODE_TRIGGER_EMOJIS,
+} from "./reaction-manager";
 import { MessageProcessor } from "./message-processor";
 import { resolveMode } from "./request-mode";
 import {
@@ -22,7 +25,7 @@ import {
   generateMessageId,
   isFullContentLoggingAllowed,
 } from "./tracking";
-import { UserUtils } from "./user-utils";
+import { UserUtils, redactChannelName } from "./user-utils";
 import {
   CONTEXT_CACHE_TTL_MS,
   INCOMING_MESSAGE_LOG_MAX_LENGTH,
@@ -38,7 +41,6 @@ export class SlackHandler {
   private activeControllers: Map<string, AbortController> = new Map();
   private logger = new Logger("SlackHandler");
   private fileHandler: FileHandler;
-  private mcpManager: McpManager;
   private channelConfig: ChannelConfigManager;
   private reactionManager: ReactionManager;
   private messageProcessor: MessageProcessor;
@@ -57,15 +59,13 @@ export class SlackHandler {
   constructor(
     app: App,
     claudeHandler: ClaudeHandler,
-    mcpManager: McpManager,
     reactionManager: ReactionManager,
+    channelConfig: ChannelConfigManager,
   ) {
     this.app = app;
     this.claudeHandler = claudeHandler;
-    this.mcpManager = mcpManager;
     this.fileHandler = new FileHandler(app);
-    this.channelConfig = new ChannelConfigManager();
-    this.channelConfig.setApp(app);
+    this.channelConfig = channelConfig;
     this.reactionManager = reactionManager;
     this.messageProcessor = new MessageProcessor(
       claudeHandler,
@@ -726,6 +726,9 @@ export class SlackHandler {
               result.tokenUsage.cacheCreationInputTokens;
           }
         }
+        if (result.costUsd !== undefined) {
+          responseLog.costUsd = result.costUsd;
+        }
         this.logger.infoSensitive(
           "📤 Response:",
           responseLog,
@@ -812,7 +815,11 @@ export class SlackHandler {
         event.channel,
         event.channel_type,
       );
-      const combinedText = this.getCombinedText(event.text, event.blocks);
+      const combinedText = this.getCombinedText(
+        event.text,
+        event.blocks,
+        (event as any).attachments,
+      );
       const channelConfig =
         await this.channelConfig.findMatchingConditionalChannel(
           channelName,
@@ -1015,6 +1022,10 @@ export class SlackHandler {
       explicitMention: event.explicitMention,
       replyBroadcast: event.replyBroadcast,
       isNonEphemeralConditionalChannel: isNonEphemeralConditional ?? false,
+      reactionKey: (await this.shouldShowReactions(event))
+        ? reactionKey
+        : undefined,
+      workingDirectory: session.workingDirectory,
     };
 
     // Message triggers in event.text override the channel-level default.
@@ -1022,7 +1033,12 @@ export class SlackHandler {
       event.channel,
       event.channel_type,
     );
-    const requestMode = resolveMode(event.text, channelMode);
+    const requestMode = resolveMode(
+      event.text,
+      channelMode,
+      !!event.explicitMention,
+      MODE_TRIGGER_EMOJIS,
+    );
 
     // Process with Claude via MessageProcessor
     const claudeStart = Date.now();
@@ -1030,7 +1046,7 @@ export class SlackHandler {
       userPrompt,
       session,
       abortController,
-      config.baseDirectory,
+      session.workingDirectory,
       slackContext,
       reactionKey,
       systemPrompt,
@@ -1044,7 +1060,7 @@ export class SlackHandler {
       }
     }
 
-    return result;
+    return { ...result, requestMode };
   }
 
   /**
@@ -1064,7 +1080,6 @@ export class SlackHandler {
   ): Promise<{ userPrompt: string; systemPrompt: string }> {
     // Build the system prompt from context files
     const generalContext = await this.channelConfig.getGeneralContextForChannel(
-      event.channel,
       event.channel_type,
       !!event.explicitMention,
       event.text,
@@ -1175,7 +1190,7 @@ export class SlackHandler {
 
       for (const msg of previousMessages) {
         // Skip messages without text, files, or blocks
-        if (!msg.text && !msg.files && !msg.blocks) {
+        if (!msg.text && !msg.files && !msg.blocks && !msg.attachments) {
           continue;
         }
 
@@ -1192,7 +1207,11 @@ export class SlackHandler {
         }
 
         // Format message text (combine plain text with block content)
-        let messageText = this.getCombinedText(msg.text, msg.blocks);
+        let messageText = this.getCombinedText(
+          msg.text,
+          msg.blocks,
+          msg.attachments,
+        );
 
         // Handle files if present
         if (msg.files && msg.files.length > 0) {
@@ -1259,6 +1278,7 @@ export class SlackHandler {
     original_question?: string;
     original_answer?: string;
     original_root_ts?: string;
+    chunk_ts?: string[];
   }): any {
     return {
       type: "actions",
@@ -1341,6 +1361,7 @@ export class SlackHandler {
   ): Promise<any> {
     const chunks = this.splitMessageForSlack(text);
     let result: any;
+    const priorChunkTimestamps: string[] = [];
 
     for (let i = 0; i < chunks.length; i++) {
       const isLastChunk = i === chunks.length - 1;
@@ -1348,7 +1369,15 @@ export class SlackHandler {
 
       const blocks: any[] = this.buildTextAndImageBlocks(chunk);
       if (isLastChunk) {
-        blocks.push(this.createVotingButtonsBlock(votingData));
+        blocks.push(
+          this.createVotingButtonsBlock({
+            ...votingData,
+            chunk_ts:
+              priorChunkTimestamps.length > 0
+                ? [...priorChunkTimestamps]
+                : undefined,
+          }),
+        );
       }
 
       result = await poster({
@@ -1361,6 +1390,11 @@ export class SlackHandler {
       });
 
       if (!isLastChunk) {
+        // Collect the timestamp of this non-last chunk so the delete handler
+        // can remove every part of a split reply.
+        if (result?.ts) {
+          priorChunkTimestamps.push(result.ts);
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
@@ -1382,26 +1416,64 @@ export class SlackHandler {
     original_question?: string;
     original_answer?: string;
     original_root_ts?: string;
+    chunk_ts?: string[];
   }): string {
-    const maxLen = 400; // Truncate fields to keep total under 2001 chars
-    const truncate = (s: string) =>
-      s.length > maxLen ? s.substring(0, maxLen) + "..." : s;
-
     const safeData: any = { channel: data.channel };
     if (data.channel_type) safeData.channel_type = data.channel_type;
     if (data.root_ts) safeData.root_ts = data.root_ts;
     if (data.thread_ts) safeData.thread_ts = data.thread_ts;
     if (data.original_root_ts)
       safeData.original_root_ts = data.original_root_ts;
+    if (data.chunk_ts && data.chunk_ts.length > 0)
+      safeData.chunk_ts = data.chunk_ts.slice(0, 15);
 
-    for (const key of [
+    const textKeys = [
       "question",
       "answer",
       "message_text",
       "original_question",
       "original_answer",
-    ] as const) {
-      if (data[key]) safeData[key] = truncate(data[key]!);
+    ] as const;
+    const presentKeys = textKeys.filter(k => data[k]);
+    if (presentKeys.length === 0) {
+      return JSON.stringify(safeData);
+    }
+
+    // Slack's limit applies to the serialized value, where escape sequences
+    // (\n, \", \\) and the `"key":"",` syntax inflate the length beyond the
+    // raw text, so budget JSON-encoded lengths rather than raw char counts.
+    const getEncodedLength = (s: string): number =>
+      JSON.stringify(s).length - 2;
+    const shell: any = { ...safeData };
+    for (const key of presentKeys) {
+      shell[key] = "";
+    }
+    const budgetPerKey = Math.floor(
+      (SlackHandler.SLACK_BUTTON_VALUE_MAX_SIZE -
+        JSON.stringify(shell).length) /
+        presentKeys.length,
+    );
+
+    const truncateToBudget = (s: string, budget: number): string => {
+      if (getEncodedLength(s) <= budget) return s;
+      const ellipsis = "...";
+      if (budget <= ellipsis.length) return "";
+      // Longest prefix whose encoded length, plus the ellipsis, fits the budget
+      let lo = 0;
+      let hi = s.length;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (getEncodedLength(s.substring(0, mid)) + ellipsis.length <= budget) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return s.substring(0, lo) + ellipsis;
+    };
+
+    for (const key of presentKeys) {
+      safeData[key] = truncateToBudget(data[key]!, budgetPerKey);
     }
 
     return JSON.stringify(safeData);
@@ -1514,8 +1586,10 @@ export class SlackHandler {
           outputTokens: result.tokenUsage?.outputTokens,
           cacheReadInputTokens: result.tokenUsage?.cacheReadInputTokens,
           cacheCreationInputTokens: result.tokenUsage?.cacheCreationInputTokens,
+          costUsd: result.costUsd,
           turnCount: result.turnCount,
           phaseTimings,
+          isOpusFastMode: result.requestMode?.fast ?? false,
         });
       } catch (trackingError) {
         this.logger.warn(
@@ -1527,16 +1601,23 @@ export class SlackHandler {
 
     // Update final reaction (skip entirely for ephemeral messages)
     if (!willBeEphemeral && (await this.shouldShowReactions(event))) {
-      const isConditionalSkip =
-        result.shouldNotRespond &&
-        (await this.channelConfig.isConditionalReplyChannel(
-          event.channel,
-          event.channel_type,
-        ));
-      await this.reactionManager.updateReaction(
-        reactionKey,
-        isConditionalSkip ? REACTIONS.SKIPPED : REACTIONS.COMPLETE,
+      // Approvable actions own their reaction lifecycle end-to-end
+      // (waiting-on-human → complete/error, driven by the registry).
+      const registryOwnsReaction = result.toolCallNames?.some((n: string) =>
+        n.startsWith("mcp__approvable-actions__"),
       );
+      if (!registryOwnsReaction) {
+        const isConditionalSkip =
+          result.shouldNotRespond &&
+          (await this.channelConfig.isConditionalReplyChannel(
+            event.channel,
+            event.channel_type,
+          ));
+        await this.reactionManager.updateReaction(
+          reactionKey,
+          isConditionalSkip ? REACTIONS.SKIPPED : REACTIONS.COMPLETE,
+        );
+      }
     }
 
     // Send debug logs if available
@@ -1572,14 +1653,17 @@ export class SlackHandler {
     // Clean up controller
     this.activeControllers.delete(sessionKey);
 
-    // Schedule cleanup of reaction tracking
+    // Schedule cleanup of reaction tracking. Kept long enough to outlive a
+    // pending approvable-action dialog: approve/cancel can land hours later and
+    // update the original message's reaction through this same session, so it
+    // must still be registered when they do.
     const keyToClean = reactionKey || sessionKey;
     setTimeout(
       () => {
         this.reactionManager.cleanupSession(keyToClean);
       },
-      5 * 60 * 1000,
-    ); // 5 minutes
+      12 * 60 * 60 * 1000,
+    ); // 12 hours
   }
 
   /**
@@ -1719,10 +1803,7 @@ export class SlackHandler {
 
   private formatMessage(text: string): string {
     return text
-      .replace(
-        /```(\w+)?\n([\s\S]*?)```/g,
-        (_, lang, code) => "```" + code + "```",
-      )
+      .replace(/```(?:\w+)?\n([\s\S]*?)```/g, (_, code) => "```" + code + "```")
       .replace(/`([^`]+)`/g, "`$1`")
       .replace(/\*\*([^*]+)\*\*/g, "*$1*")
       .replace(/__([^_]+)__/g, "_$1_");
@@ -1746,18 +1827,6 @@ export class SlackHandler {
       await this.reactionManager.updateReaction(reactionKey, REACTIONS.SKIPPED);
     }
     return true;
-  }
-
-  private isMentionAtNaturalStart(text: string, botUserId: string): boolean {
-    const mentionPattern = `<@${botUserId}>`;
-    const escapedMentionPattern = mentionPattern.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&",
-    );
-    const naturalStartRegex = new RegExp(
-      `(^\\s*|\\n\\s*|[.!?]\\s+)${escapedMentionPattern}`,
-    );
-    return naturalStartRegex.test(text);
   }
 
   private async getBotUserId(): Promise<string> {
@@ -1840,6 +1909,7 @@ export class SlackHandler {
             const combinedText = this.getCombinedText(
               message.text,
               message.blocks,
+              message.attachments,
             );
             conditionalChannel =
               await this.channelConfig.findMatchingConditionalChannel(
@@ -1869,9 +1939,17 @@ export class SlackHandler {
             if (shouldHandle) {
               await this.handleMessage(normalizedEvent, say);
             } else {
+              const allowFullLogging = await isFullContentLoggingAllowed(
+                channelId,
+                channelType,
+              );
               this.logger.info("Message skipped due to shouldHandle=false", {
                 channelId,
-                channelName,
+                channelName: redactChannelName(
+                  channelName,
+                  channelType,
+                  allowFullLogging,
+                ),
                 userId: message.user ?? message.bot_id ?? "undefined",
                 textPreview: (message.text || "").substring(0, 100),
               });
@@ -2022,11 +2100,28 @@ export class SlackHandler {
             this.logger.warn("Failed to track delete feedback", trackingError);
           }
 
-          // Delete the bot message
+          // Delete the bot message (last chunk / only message)
           await this.app.client.chat.delete({
             channel,
             ts,
           });
+
+          // Delete prior chunks of a split reply, if any
+          if (parsed?.chunk_ts && Array.isArray(parsed.chunk_ts)) {
+            for (const chunkTs of parsed.chunk_ts) {
+              try {
+                await this.app.client.chat.delete({
+                  channel,
+                  ts: chunkTs,
+                });
+              } catch (chunkError) {
+                this.logger.warn(
+                  `Failed to delete chunk message ${chunkTs}`,
+                  chunkError,
+                );
+              }
+            }
+          }
 
           this.logger.info(
             `🗑️ Delete by ${await UserUtils.getUsername(this.app, userId)}`,
@@ -2084,6 +2179,7 @@ export class SlackHandler {
           );
 
           let publicMessage: any;
+          const priorPublicChunkTs: string[] = [];
           for (let i = 0; i < fullMessageChunks.length; i++) {
             const isLastChunk = i === fullMessageChunks.length - 1;
             const chunk = fullMessageChunks[i];
@@ -2100,6 +2196,10 @@ export class SlackHandler {
                   root_ts: votingData?.root_ts || threadTs || "",
                   question: votingData?.question || "",
                   answer: votingData?.answer || messageText,
+                  chunk_ts:
+                    priorPublicChunkTs.length > 0
+                      ? [...priorPublicChunkTs]
+                      : undefined,
                 }),
               );
             }
@@ -2111,6 +2211,10 @@ export class SlackHandler {
               thread_ts: threadTs,
               blocks: chunkBlocks,
             });
+
+            if (!isLastChunk && publicMessage?.ts) {
+              priorPublicChunkTs.push(publicMessage.ts);
+            }
 
             // Use the first message's timestamp for subsequent chunks
             // Only if there wasn't already a thread_ts set (avoid creating nested threads)
@@ -2258,6 +2362,7 @@ export class SlackHandler {
     original_question?: string;
     original_answer?: string;
     original_root_ts?: string;
+    chunk_ts?: string[];
   } | null {
     try {
       if (!action?.value) return null;
@@ -2273,9 +2378,32 @@ export class SlackHandler {
    * Extract text content from Slack blocks recursively.
    * Handles header, section, rich_text, context, and other block types.
    */
-  private getCombinedText(text?: string, blocks?: any[]): string {
-    const blockText = this.extractTextFromBlocks(blocks);
-    return [text, blockText].filter(Boolean).join(" ");
+  private getCombinedText(
+    text?: string,
+    blocks?: any[],
+    attachments?: any[],
+  ): string {
+    // For user-typed messages, rich_text blocks mirror `text`; extracting
+    // them duplicates the message everywhere downstream (agent input,
+    // ephemeral channel clones). Only read them when there is no plain
+    // text to mirror. Content-bearing blocks (section/header/context in
+    // bot alerts) are still extracted.
+    const contentBlocks = text
+      ? blocks?.filter(b => b?.type !== "rich_text")
+      : blocks;
+    const blockText = this.extractTextFromBlocks(contentBlocks);
+    const attachmentText = this.extractTextFromAttachments(attachments);
+    return [text, blockText, attachmentText].filter(Boolean).join(" ");
+  }
+
+  private extractTextFromAttachments(attachments?: any[]): string {
+    if (!attachments || !Array.isArray(attachments)) {
+      return "";
+    }
+    return attachments
+      .map(a => [a.text, a.fallback, a.pretext].filter(Boolean).join(" "))
+      .filter(Boolean)
+      .join(" ");
   }
 
   private extractTextFromBlocks(blocks?: any[]): string {
@@ -2342,13 +2470,14 @@ export class SlackHandler {
 
     try {
       const botUserId = await this.getBotUserId();
+      const botMentionPattern = `<@${botUserId}>`;
       if (
         botUserId &&
         typeof text === "string" &&
-        this.isMentionAtNaturalStart(text, botUserId)
+        text.includes(botMentionPattern)
       ) {
         explicitMention = true;
-        text = text.replace(/<@[^>]+>/g, "").trim();
+        text = text.split(botMentionPattern).join("").trim();
       }
     } catch (_) {
       // Fail open: leave explicitMention as false and text unchanged
@@ -2375,10 +2504,13 @@ export class SlackHandler {
 
     // Combine message text with block text for conditional pattern matching
     // This handles Slack Block Kit messages where content is in blocks, not text
-    const combinedText = this.getCombinedText(text, message.blocks);
+    const combinedText = this.getCombinedText(
+      text,
+      message.blocks,
+      (message as any).attachments,
+    );
 
     const shouldHandle = await this.channelConfig.shouldHandleMessage(
-      channelId,
       isDM,
       explicitMention,
       combinedText,
@@ -2402,7 +2534,12 @@ export class SlackHandler {
 
     return {
       shouldHandle,
-      event: { ...message, text, explicitMention, replyBroadcast },
+      event: {
+        ...message,
+        text: combinedText || text,
+        explicitMention,
+        replyBroadcast,
+      },
     };
   }
 }

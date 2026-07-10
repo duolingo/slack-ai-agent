@@ -14,6 +14,14 @@ export interface ActionSlackContext {
   messageTs: string;
   /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
   messageText?: string;
+  workflowId?: string;
+  botId?: string;
+  /** SlackHandler reaction key. Only set when bot lifecycle reactions are
+   *  enabled, so the registry can update the original message's reaction
+   *  through the session path while the turn is live (before cleanup). */
+  reactionKey?: string;
+  /** Per-thread agent workspace for temp files the action subprocess reads. */
+  workingDirectory?: string;
 }
 
 /**
@@ -66,7 +74,7 @@ export interface ApprovableAction<TParams> {
    *  registry calls this for each registered action right after it wires
    *  up the generic approve/cancel handlers. */
   setupActionHandlers?(app: App): void;
-  /** Optional list of Slack emoji shortcodes (e.g. [":yolo-jira:", ":duo-ai-bot-jira:"]).
+  /** Optional list of Slack emoji shortcodes (e.g. [":yolo-jira:", ":yolo-pr:"]).
    *  When any of them is present in the user's message text the confirmation
    *  dialog is skipped and the action executes immediately. */
   yoloEmojis?: string[];

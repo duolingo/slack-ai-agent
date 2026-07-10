@@ -1,13 +1,18 @@
 jest.mock("./config", () => ({
+  ...jest.requireActual("./config"),
+  provisionThreadWorkspace: (sessionKey: string) =>
+    `/tmp/slack-ai-agent/workspaces/${sessionKey}`,
+  destroyThreadWorkspace: jest.fn(),
   config: {
     slack: {
       botToken: "xoxb-test",
       appToken: "xapp-test",
       signingSecret: "test-secret",
     },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-7" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
     slackWorkspaceUrl: "https://test.slack.com",
-    baseDirectory: "/tmp/test",
+    baseDirectory: "/tmp/slack-ai-agent",
+    persistDir: "/tmp/test-persist",
     debug: false,
   },
 }));
@@ -26,7 +31,14 @@ import {
   ClaudeHandler,
   DEFAULT_SESSION_MAX_AGE_MS,
   shouldInjectActions,
+  buildSanitizedEnv,
 } from "./claude-handler";
+import {
+  destroyThreadWorkspace,
+  buildSandboxFilesystem,
+  SANDBOX_FILESYSTEM,
+  SANDBOX_NETWORK,
+} from "./config";
 
 function createHandler(retryOverrides?: {
   maxRetries?: number;
@@ -91,6 +103,7 @@ describe("ClaudeHandler", () => {
       expect(session.channelId).toBe("C2");
       expect(session.threadTs).toBe("111.222");
       expect(session.lastActivity).toBeInstanceOf(Date);
+      expect(session.workingDirectory).toContain("workspaces/U1-C2-111.222");
 
       const retrieved = handler.getSession("U1", "C2", "111.222");
       expect(retrieved).toBe(session);
@@ -121,6 +134,7 @@ describe("ClaudeHandler", () => {
     let handler: ClaudeHandler;
     beforeEach(() => {
       handler = createHandler();
+      jest.mocked(destroyThreadWorkspace).mockClear();
     });
 
     it("removes sessions older than maxAge", () => {
@@ -130,6 +144,7 @@ describe("ClaudeHandler", () => {
 
       handler.cleanupInactiveSessions(30_000); // 30s max age
       expect(handler.getSession("U1", "C1", "1.1")).toBeUndefined();
+      expect(destroyThreadWorkspace).toHaveBeenCalledWith("U1-C1-1.1");
     });
 
     it("keeps sessions younger than maxAge", () => {
@@ -307,5 +322,104 @@ describe("shouldInjectActions", () => {
 
   it("returns false for group channels without triggers", () => {
     expect(shouldInjectActions({ ...base, channelType: "group" })).toBe(false);
+  });
+});
+
+describe("buildSanitizedEnv", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = {
+      PATH: "/usr/bin",
+      HOME: "/home/user",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      AWS_ACCESS_KEY_ID: "AKIA-test",
+      AWS_SECRET_ACCESS_KEY: "aws-secret-test",
+      AWS_SESSION_TOKEN: "aws-session-test",
+      AWS_REGION: "us-east-1",
+      AWS_PROFILE: "test-profile",
+      CC_SLACK_BOT_TOKEN: "xoxb-secret",
+      CC_SLACK_APP_TOKEN: "xapp-secret",
+      CC_SLACK_SIGNING_SECRET: "signing-secret",
+      GLEAN_API_TOKEN: "glean-secret",
+      GIT_LINK_HMAC_SECRET: "hmac-secret",
+    };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("includes allowed env vars and AWS credentials", () => {
+    const env = buildSanitizedEnv();
+    expect(Object.keys(env).sort()).toEqual([
+      "ANTHROPIC_API_KEY",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_PROFILE",
+      "AWS_REGION",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "HOME",
+      "PATH",
+    ]);
+  });
+
+  it("excludes all other secrets", () => {
+    const env = buildSanitizedEnv();
+    expect(env.CC_SLACK_BOT_TOKEN).toBeUndefined();
+    expect(env.CC_SLACK_APP_TOKEN).toBeUndefined();
+    expect(env.CC_SLACK_SIGNING_SECRET).toBeUndefined();
+    expect(env.GLEAN_API_TOKEN).toBeUndefined();
+    expect(env.GIT_LINK_HMAC_SECRET).toBeUndefined();
+  });
+
+  it("omits AWS vars that are not set in the environment", () => {
+    delete process.env.AWS_PROFILE;
+    delete process.env.AWS_SESSION_TOKEN;
+    const env = buildSanitizedEnv();
+    expect(env.AWS_PROFILE).toBeUndefined();
+    expect(env.AWS_SESSION_TOKEN).toBeUndefined();
+    expect(env.AWS_ACCESS_KEY_ID).toBe("AKIA-test");
+  });
+
+  it("passes MCP_TOOL_TIMEOUT through when set", () => {
+    process.env.MCP_TOOL_TIMEOUT = "180000";
+    expect(buildSanitizedEnv().MCP_TOOL_TIMEOUT).toBe("180000");
+  });
+});
+
+describe("SANDBOX_FILESYSTEM", () => {
+  // Regression guard: the `bq` CLI refreshes its OAuth token cache into
+  // ~/.config/gcloud on every call, so the dir must be writable, not just
+  // readable, or bq dies with a read-only filesystem error.
+  it("lets bq both read and write its gcloud token cache in place", () => {
+    expect(SANDBOX_FILESYSTEM.allowRead).toContain("~/.config/gcloud");
+    expect(SANDBOX_FILESYSTEM.allowWrite).toContain("~/.config/gcloud");
+  });
+
+  it("keeps the rest of $HOME unreadable so repo secrets stay hidden", () => {
+    expect(SANDBOX_FILESYSTEM.denyRead).toContain("~/");
+    // The sandbox cwd stays writable for the agent's own scratch files.
+    expect(SANDBOX_FILESYSTEM.allowWrite).toContain("/tmp/slack-ai-agent");
+  });
+
+  it("scopes bash writes to the thread workspace cwd", () => {
+    const threadWorkspace = "/tmp/slack-ai-agent/workspaces/U1-C2-1.1";
+    const rules = buildSandboxFilesystem(threadWorkspace);
+    expect(rules.allowWrite).toEqual([threadWorkspace, "~/.config/gcloud"]);
+    expect(rules.denyRead).toEqual(SANDBOX_FILESYSTEM.denyRead);
+    expect(rules.allowRead).toEqual(SANDBOX_FILESYSTEM.allowRead);
+  });
+});
+
+describe("SANDBOX_NETWORK", () => {
+  // The bash sandbox only reaches managed domains by default, so the `bq` and
+  // `aws` CLIs the data skills shell out to need these endpoints allowlisted:
+  // `bq` refreshes its OAuth token against googleapis.com, and `aws` reads
+  // instance-profile credentials from the IMDS link-local address.
+  it("allows the Google Cloud and AWS endpoints the data CLIs need", () => {
+    expect(SANDBOX_NETWORK.allowedDomains).toContain("*.googleapis.com");
+    expect(SANDBOX_NETWORK.allowedDomains).toContain("*.amazonaws.com");
+    expect(SANDBOX_NETWORK.allowedDomains).toContain("169.254.169.254");
   });
 });

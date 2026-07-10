@@ -10,9 +10,12 @@ import {
   ApprovableActionRegistry,
   loadApprovableActions,
 } from "./approvable-actions";
+import { startActiveWorkflowCleanup } from "../config/approvable-actions/create-pr-via-temporal";
 import { Logger } from "./logger";
 import { UserUtils } from "./user-utils";
 import { initTracking } from "./tracking";
+import { ChannelConfigManager } from "./channel-config";
+import { OpusHealthMonitor, buildSlackNotify } from "./opus-health";
 
 const logger = new Logger("Main");
 
@@ -31,7 +34,9 @@ async function start() {
 
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
-    initTracking(app);
+    const channelConfigManager = new ChannelConfigManager();
+    channelConfigManager.setApp(app);
+    initTracking(app, channelConfigManager);
 
     const reactionManager = new ReactionManager(app);
 
@@ -42,13 +47,22 @@ async function start() {
     }
     registry.setupButtonHandlers();
     registry.startSessionCleanup();
+    startActiveWorkflowCleanup();
 
-    const claudeHandler = new ClaudeHandler(mcpManager, registry);
+    const opusHealthMonitor = new OpusHealthMonitor({
+      notify: buildSlackNotify(app, config.opsAlertChannelId),
+    });
+
+    const claudeHandler = new ClaudeHandler(
+      mcpManager,
+      registry,
+      opusHealthMonitor,
+    );
     const slackHandler = new SlackHandler(
       app,
       claudeHandler,
-      mcpManager,
       reactionManager,
+      channelConfigManager,
     );
     slackHandler.setupEventHandlers();
 

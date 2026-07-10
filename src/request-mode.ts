@@ -1,50 +1,123 @@
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
-/**
- * Allowed Claude model identifiers, restricted to the model families we
- * currently support. Strings match Anthropic's canonical IDs:
- * https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
- */
 export type AllowedModel =
-  | "claude-opus-4-7"
+  | "claude-opus-4-8"
   | "claude-sonnet-4-6"
-  | "claude-haiku-4-5";
+  | "claude-haiku-4-5"
+  | "claude-fable-5";
 
 export interface RequestMode {
   model?: AllowedModel;
-  /** Effort level. Dropped when the resolved model can't accept it (Haiku). */
   effort?: EffortLevel;
+  fast?: boolean;
 }
 
-/** Haiku does not support the `effort` parameter. */
-export const HAIKU_MODEL: AllowedModel = "claude-haiku-4-5";
+export interface ChannelModeConfig {
+  model?: AllowedModel;
+  effort?: EffortLevel;
+  /** Regex tested against message text; fast mode activates on match. Use ".*" for always-on. */
+  fastModePattern?: string;
+  /** Fast mode activates when the user @-mentions the bot. */
+  fastModeTagBot?: boolean;
+}
 
-const MAX_EFFORT_TRIGGERS = [":duo-ai-bot-think:", "think hard", "try hard"];
-const FAST_TRIGGERS = [":duo-ai-bot-fast:", "think fast"];
+export const OPUS_MODEL: AllowedModel = "claude-opus-4-8";
+export const SONNET_MODEL: AllowedModel = "claude-sonnet-4-6";
+export const HAIKU_MODEL: AllowedModel = "claude-haiku-4-5";
+export const FABLE_MODEL: AllowedModel = "claude-fable-5";
+
+/**
+ * Optional per-deployment Slack emoji shortcodes (with colons, e.g.
+ * ":acme-bot-fast:") that trigger the same tiers as the phrases below.
+ * Configured in config/emojis.yaml — kept out of this file since it's
+ * synced to the public template repo and the emoji names are company-specific.
+ */
+export interface ModeTriggerEmojis {
+  fast?: string;
+  thinkHardest?: string;
+  think?: string;
+}
+
+// First match wins. Longer phrases before shorter ones they contain
+// (e.g. "think harder" before "think hard") to avoid substring collisions.
+const MODE_TIERS: {
+  emojiKey: keyof ModeTriggerEmojis;
+  triggers: string[];
+  mode: RequestMode;
+}[] = [
+  {
+    emojiKey: "fast",
+    triggers: ["think fast"],
+    mode: { model: HAIKU_MODEL },
+  },
+  {
+    emojiKey: "thinkHardest",
+    triggers: [
+      "think hardest",
+      "try hardest",
+      "think harder",
+      "try harder",
+      "think dangerously",
+    ],
+    mode: { model: FABLE_MODEL, effort: "max" },
+  },
+  {
+    emojiKey: "think",
+    triggers: ["think hard", "try hard"],
+    mode: { effort: "max" },
+  },
+];
 
 const supportsEffort = (model: string | undefined): boolean =>
   !model?.toLowerCase().includes("haiku");
 
-/**
- * Resolve the effective model + effort for a Slack message.
- *
- * Message-level triggers (case-insensitive substring in user text) always
- * override the channel-level default — including releasing a channel's
- * Haiku pin when the user asks for higher effort.
- */
+// Fast mode is Opus-only. `undefined` means the default model (Opus), so it
+// qualifies; any explicitly pinned non-Opus model does not.
+const supportsFastMode = (model: string | undefined): boolean =>
+  model === undefined || model.toLowerCase().includes("opus");
+
 export const resolveMode = (
   text: string | undefined,
-  channelMode: RequestMode | undefined,
+  channelMode: ChannelModeConfig | undefined,
+  explicitMention?: boolean,
+  modeTriggerEmojis?: ModeTriggerEmojis,
 ): RequestMode => {
   const lower = (text || "").toLowerCase();
-  const msgFast = FAST_TRIGGERS.some(t => lower.includes(t));
-  const msgMax = !msgFast && MAX_EFFORT_TRIGGERS.some(t => lower.includes(t));
 
-  let model = msgFast ? HAIKU_MODEL : channelMode?.model;
-  let effort: EffortLevel | undefined = msgMax ? "max" : channelMode?.effort;
+  const matched = MODE_TIERS.find(tier => {
+    const emoji = modeTriggerEmojis?.[tier.emojiKey];
+    return (
+      tier.triggers.some(t => lower.includes(t)) ||
+      (!!emoji && lower.includes(emoji.toLowerCase()))
+    );
+  });
 
-  if (msgMax && !supportsEffort(model)) model = undefined;
+  let model = matched?.mode.model ?? channelMode?.model;
+  let effort = matched?.mode.effort ?? channelMode?.effort;
+  // Either condition independently enables fast mode (OR, not AND).
+  let patternMatch = false;
+  if (channelMode?.fastModePattern) {
+    try {
+      patternMatch = new RegExp(channelMode.fastModePattern, "i").test(
+        text || "",
+      );
+    } catch {
+      // Invalid regex in config — fail open (no fast mode) rather than crashing.
+    }
+  }
+  let fast = (channelMode?.fastModeTagBot && explicitMention) || patternMatch;
+
+  // When a trigger only sets effort (no model), release a channel Haiku pin
+  // so the effort can actually take effect.
+  if (matched && !matched.mode.model && effort && !supportsEffort(model)) {
+    model = undefined;
+  }
   if (!supportsEffort(model)) effort = undefined;
+  if (!supportsFastMode(model)) fast = false;
 
-  return { ...(model && { model }), ...(effort && { effort }) };
+  return {
+    ...(model && { model }),
+    ...(effort && { effort }),
+    ...(fast && { fast: true }),
+  };
 };

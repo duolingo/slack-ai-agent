@@ -13,13 +13,22 @@ channelSettings:
   - channelNamePattern: "^help-devops$"
     file: example-channel.txt
   # Optional per-channel model/effort overrides. Users can also override per
-  # message with :duo-ai-bot-think:/"think hard"/"try hard" (max effort) or
-  # :duo-ai-bot-fast:/"think fast" (latest Haiku model).
+  # message with "think hardest"/"try hardest"/"think harder"/"try harder"/
+  # "think dangerously" (Fable model, max effort), "think hard"/"try hard"
+  # (max effort), or "think fast" (latest Haiku model). See
+  # ModeTriggerEmojis in src/request-mode.ts to also match a custom Slack
+  # emoji shortcode for each trigger.
   # - channelNamePattern: "^(pd-.*|pagerduty)$"
   #   file: pagerduty-triage.txt
   #   effort: max
   # - channelNamePattern: "^chat-only$"
   #   model: claude-haiku-4-5
+
+# Channel or DM IDs whose full message + tool-call content is logged even
+# when the conversation is private. Without this, private logs are redacted.
+# fullContentLoggingAllowlist:
+#   - C0EXAMPLE01 # priv-my-alerts-channel
+#   - D0EXAMPLE02 # DM with a specific user
 
 conditionalReplyChannels:
   # Channels that respond to all messages (no requiredKeywords = match all)

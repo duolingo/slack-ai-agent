@@ -2,9 +2,35 @@ import fs from "fs";
 import { App } from "@slack/bolt";
 import * as yaml from "js-yaml";
 import { Logger } from "./logger";
-import { DEFAULT_EMAIL, USER_CACHE_TTL_MS } from "./constants";
+import { USER_CACHE_TTL_MS } from "./constants";
+import { SlackChannelType } from "./types";
 
 const logger = new Logger("UserUtils");
+
+/**
+ * Resolve the channel name that is safe to expose in logs and tracking.
+ *
+ * A private channel's name can itself be sensitive (e.g. incident, project, or
+ * people-related channels), so the real name is disclosed only when full
+ * content logging is allowed (public / allowlisted channels). Otherwise a
+ * category label is returned so consumers can still tell DMs apart from private
+ * channels without leaking the name.
+ */
+export const redactChannelName = (
+  channelName: string | undefined,
+  channelType: SlackChannelType,
+  allowFullLogging: boolean,
+): string | undefined => {
+  if (allowFullLogging) return channelName;
+  switch (channelType) {
+    case "im":
+      return "direct-message";
+    case "mpim":
+      return "group-dm";
+    default:
+      return "private-channel";
+  }
+};
 
 interface Employee {
   email: string;
@@ -156,7 +182,7 @@ export class UserUtils {
     const n = typeof raw === "number" ? raw : Number(raw);
     if (!Number.isFinite(n)) {
       logger.warn("Invalid userId in employee record", {
-        slackId: slackId.slice(-4),
+        slackId,
       });
       return null;
     }
@@ -233,7 +259,7 @@ export class UserUtils {
 
       if (!employee) {
         logger.info("User role: not an employee", {
-          userId: userId.slice(-4),
+          userId,
         });
         return "none";
       }
@@ -242,14 +268,14 @@ export class UserUtils {
 
       if (!role) {
         logger.info("User role: employee has no role assigned", {
-          userId: userId.slice(-4),
+          userId,
           email: employee.email,
         });
         return "none";
       }
 
       logger.info("User role determined", {
-        userId: userId.slice(-4),
+        userId,
         email: employee.email,
         role,
       });

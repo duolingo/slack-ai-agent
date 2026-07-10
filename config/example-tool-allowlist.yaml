@@ -39,9 +39,9 @@ member:
   - "Bash(rg:*)"
 
   # Example MCP server tools (uncomment and adjust for your setup)
-  # - mcp__slack__slack_list_channels
+  # - mcp__slack__slack_get_channel_messages
   # - mcp__slack__slack_search_messages
-  # - mcp__slack__slack_get_channel_history
+  # - mcp__slack__slack_get_channels
   # - mcp__slack__slack_get_thread_replies
   # - mcp__github__get_file_contents
   # - mcp__github__list_commits

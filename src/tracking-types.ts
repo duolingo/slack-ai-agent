@@ -21,8 +21,10 @@ export interface MessageProcessedEvent {
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  costUsd?: number;
   turnCount?: number;
   phaseTimings?: PhaseTimings;
+  isOpusFastMode?: boolean;
 }
 
 export interface FeedbackEvent {

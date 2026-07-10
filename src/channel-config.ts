@@ -2,7 +2,7 @@ import { App } from "@slack/bolt";
 import { Logger } from "./logger";
 import { SlackChannelType } from "./types";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
-import { AllowedModel, EffortLevel } from "./request-mode";
+import { AllowedModel, ChannelModeConfig, EffortLevel } from "./request-mode";
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
@@ -15,6 +15,11 @@ interface ChannelSettings {
   model?: AllowedModel;
   /** Per-channel effort override. Dropped for models that don't accept effort (e.g. Haiku). */
   effort?: EffortLevel;
+  // fastModePattern and fastModeTagBot are OR — either independently enables fast mode.
+  /** Regex tested against the message text; fast mode activates only on match. Use ".*" for always-on. */
+  fastModePattern?: string;
+  /** Fast mode activates when the user @-mentions the bot. */
+  fastModeTagBot?: boolean;
 }
 
 interface ConditionalReplyChannel {
@@ -31,6 +36,7 @@ interface ChannelConfig {
   conditionalReplyChannels?: ConditionalReplyChannel[];
   ephemeralChannelConfig: Record<string, string[]>;
   dmNotificationConfig: Record<string, string[]>;
+  fullContentLoggingAllowlist?: string[];
 }
 
 export class ChannelConfigManager {
@@ -335,7 +341,6 @@ export class ChannelConfigManager {
    * Determine if the bot should handle a message in this channel
    */
   async shouldHandleMessage(
-    channelId: string,
     isDM: boolean,
     isMentioned: boolean,
     messageText?: string,
@@ -354,14 +359,20 @@ export class ChannelConfigManager {
     return isMentioned;
   }
 
-  /** Per-channel Claude model + effort override, if configured. */
+  /** Per-channel Claude model / effort / fast-mode override, if configured. */
   async getChannelModelOverride(
     channelId: string,
     channelType: SlackChannelType,
-  ): Promise<{ model?: AllowedModel; effort?: EffortLevel } | undefined> {
+  ): Promise<ChannelModeConfig | undefined> {
     const s = await this.findChannelSettings(channelId, channelType);
-    if (!s?.model && !s?.effort) return undefined;
-    return { model: s.model, effort: s.effort };
+    if (!s?.model && !s?.effort && !s?.fastModePattern && !s?.fastModeTagBot)
+      return undefined;
+    return {
+      model: s.model,
+      effort: s.effort,
+      fastModePattern: s.fastModePattern,
+      fastModeTagBot: s.fastModeTagBot,
+    };
   }
 
   /**
@@ -373,7 +384,6 @@ export class ChannelConfigManager {
   }
 
   async getGeneralContextForChannel(
-    channelId: string,
     channelType: SlackChannelType | undefined,
     explicitMention?: boolean,
     messageText?: string,
@@ -388,6 +398,11 @@ export class ChannelConfigManager {
       return base;
     }
     return `${base}\n\n**NOTE**: If not a question or the user doesn't seem to need help: respond exactly "DO_NOT_RESPOND" (Unless it's a pagerduty / incident / session completion rate too low alert where alert-triage skill should be used.)`;
+  }
+
+  async getFullContentLoggingAllowlist(): Promise<Set<string>> {
+    const config = await this.loadConfig();
+    return new Set(config.fullContentLoggingAllowlist ?? []);
   }
 
   /**

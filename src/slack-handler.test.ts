@@ -14,9 +14,10 @@ jest.mock("./config", () => ({
       appToken: "xapp-test",
       signingSecret: "test-secret",
     },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-7" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
+    persistDir: "/tmp/test-persist",
     debug: false,
   },
 }));
@@ -28,9 +29,11 @@ jest.mock("./reaction-manager", () => {
       TOOL_USE: "gear",
       COMPLETE: "white_check_mark",
       SKIPPED: "see_no_evil",
+      WAITING_ON_HUMAN: "raised_hand",
       ERROR: "x",
       SUPPRESSION_EMOJIS: [":shushing_face:", ":shhh:"],
     },
+    MODE_TRIGGER_EMOJIS: {},
     ReactionManager: jest.fn().mockImplementation(() => ({
       registerMessage: jest.fn(),
       updateReaction: jest.fn(),
@@ -75,6 +78,7 @@ jest.mock("./user-utils", () => ({
   },
 }));
 
+import { ChannelConfigManager } from "./channel-config";
 import { SlackHandler } from "./slack-handler";
 import { MessageEvent } from "./types";
 import { UserUtils } from "./user-utils";
@@ -122,22 +126,22 @@ function createHandler(): TestHarness {
     cleanupInactiveSessions: jest.fn(),
   } as any;
 
-  const mockMcpManager = {} as any;
   const mockReactionManager = {
     registerMessage: jest.fn(),
     updateReaction: jest.fn().mockResolvedValue(undefined),
     cleanupSession: jest.fn(),
   } as any;
 
+  const mockChannelConfig = new (ChannelConfigManager as any)();
+
   const handler = new SlackHandler(
     mockApp,
     mockClaudeHandler,
-    mockMcpManager,
     mockReactionManager,
+    mockChannelConfig,
   );
 
-  // Expose the channelConfig mock for per-test configuration
-  const channelConfig = (handler as any).channelConfig;
+  const channelConfig = mockChannelConfig;
 
   return {
     handler,
@@ -253,19 +257,66 @@ describe("SlackHandler", () => {
   describe("createSafeButtonValue", () => {
     const safe = (data: any) => priv(handler).createSafeButtonValue(data);
 
-    it("includes channel and truncates long fields", () => {
+    it("includes channel and keeps text fields that fit the budget", () => {
       const result = JSON.parse(
         safe({
           channel: "C123",
           root_ts: "1.1",
-          question: "x".repeat(500),
-          answer: "y".repeat(500),
+          question: "x".repeat(1500),
+          answer: "y".repeat(1500),
         }),
       );
       expect(result.channel).toBe("C123");
       expect(result.root_ts).toBe("1.1");
-      expect(result.question.length).toBeLessThanOrEqual(403); // 400 + "..."
-      expect(result.answer.length).toBeLessThanOrEqual(403);
+      expect(result.question.length).toBeLessThan(1500);
+      expect(result.question.endsWith("...")).toBe(true);
+      expect(result.answer.length).toBeLessThan(1500);
+      expect(result.answer.endsWith("...")).toBe(true);
+    });
+
+    it("truncates long fields so the serialized value fits Slack's 2000-char limit", () => {
+      const value = safe({
+        channel: "C123",
+        root_ts: "1.1",
+        question: "x".repeat(3000),
+        answer: "y".repeat(3000),
+      });
+      expect(value.length).toBeLessThanOrEqual(2000);
+      const result = JSON.parse(value);
+      expect(result.question.endsWith("...")).toBe(true);
+      expect(result.answer.endsWith("...")).toBe(true);
+    });
+
+    it("stays within the limit when text fields require JSON escaping", () => {
+      const line = '• "Streak Revival" lets learners revive a lost streak\n';
+      const value = safe({
+        channel: "C09KPE8EACW",
+        channel_type: "channel",
+        root_ts: "1781133411.091249",
+        question: line.repeat(18).slice(0, 960),
+        answer: line.repeat(18).slice(0, 960),
+      });
+      expect(value.length).toBeLessThanOrEqual(2000);
+      expect(JSON.parse(value).channel).toBe("C09KPE8EACW");
+    });
+
+    it("stays within the limit when all five text fields are present", () => {
+      const value = safe({
+        channel: "C123",
+        channel_type: "channel",
+        root_ts: "1.1",
+        thread_ts: "2.2",
+        original_root_ts: "3.3",
+        chunk_ts: ["4.4", "5.5"],
+        question: "q".repeat(2500),
+        answer: "a".repeat(2500),
+        message_text: "m".repeat(2500),
+        original_question: "oq".repeat(1250),
+        original_answer: "oa".repeat(1250),
+      });
+      expect(value.length).toBeLessThanOrEqual(2000);
+      const result = JSON.parse(value);
+      expect(result.chunk_ts).toEqual(["4.4", "5.5"]);
     });
 
     it("omits undefined optional fields", () => {
@@ -325,6 +376,45 @@ describe("SlackHandler", () => {
     it("handles empty inputs", () => {
       expect(combined()).toBe("");
       expect(combined("", [])).toBe("");
+    });
+
+    it("skips rich_text blocks when text is present (they mirror text)", () => {
+      const blocks = [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [{ type: "text", text: "hello world" }],
+            },
+          ],
+        },
+      ];
+      expect(combined("hello world", blocks)).toBe("hello world");
+    });
+
+    it("still extracts rich_text blocks when text is empty", () => {
+      const blocks = [
+        {
+          type: "rich_text",
+          elements: [
+            {
+              type: "rich_text_section",
+              elements: [{ type: "text", text: "only in blocks" }],
+            },
+          ],
+        },
+      ];
+      expect(combined(undefined, blocks)).toBe("only in blocks");
+    });
+
+    it("still combines section blocks with text (bot alerts)", () => {
+      const blocks = [
+        { type: "section", text: { type: "mrkdwn", text: "alert detail" } },
+      ];
+      expect(combined("Urgency: High", blocks)).toBe(
+        "Urgency: High alert detail",
+      );
     });
   });
 
@@ -455,31 +545,6 @@ describe("SlackHandler", () => {
       });
       const parsed = JSON.parse(block.elements[0].value);
       expect(parsed.channel_type).toBe("im");
-    });
-  });
-
-  describe("isMentionAtNaturalStart", () => {
-    const check = (text: string) =>
-      priv(handler).isMentionAtNaturalStart(text, "UBOTID");
-
-    it("detects mention at start of message", () => {
-      expect(check("<@UBOTID> help me")).toBe(true);
-    });
-
-    it("detects mention at start with leading whitespace", () => {
-      expect(check("  <@UBOTID> help")).toBe(true);
-    });
-
-    it("detects mention after sentence end", () => {
-      expect(check("Done. <@UBOTID> what next?")).toBe(true);
-    });
-
-    it("detects mention after newline", () => {
-      expect(check("line1\n<@UBOTID> line2")).toBe(true);
-    });
-
-    it("does not match mention in the middle of a word", () => {
-      expect(check("hello<@UBOTID>world")).toBe(false);
     });
   });
 
@@ -809,6 +874,24 @@ describe("SlackHandler", () => {
       expect(normalized.text).toBe("help me");
     });
 
+    it("sets explicitMention for mid-sentence @mention", async () => {
+      const event = makeEvent({ text: "hey <@UBOTID> can you help?" });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.explicitMention).toBe(true);
+      expect(normalized.text).toBe("hey  can you help?");
+    });
+
+    it("preserves other user mentions when stripping bot mention", async () => {
+      const event = makeEvent({
+        text: "Please ask <@U123> about this, <@UBOTID>",
+      });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.explicitMention).toBe(true);
+      expect(normalized.text).toBe("Please ask <@U123> about this,");
+    });
+
     it("does not flag mention when bot ID is missing", async () => {
       t.app.client.auth.test.mockResolvedValue({ user_id: "" });
       const event = makeEvent({ text: "<@UBOTID> help" });
@@ -837,7 +920,6 @@ describe("SlackHandler", () => {
       const event = makeEvent({ text: "hello" });
       await priv(handler).prepareEventForHandling(event, "my-channel");
       expect(t.channelConfig.shouldHandleMessage).toHaveBeenCalledWith(
-        "C456",
         false,
         false,
         expect.any(String),
@@ -876,12 +958,70 @@ describe("SlackHandler", () => {
       const event = makeEvent({ text: "hello", workflow_id: "WF123" });
       await priv(handler).prepareEventForHandling(event);
       expect(t.channelConfig.shouldHandleMessage).toHaveBeenCalledWith(
-        expect.any(String),
         expect.any(Boolean),
         expect.any(Boolean),
         expect.any(String),
         expect.any(String),
         "WF123",
+      );
+    });
+  });
+
+  describe("sendResponse — final reaction", () => {
+    const mockSay = jest.fn();
+
+    beforeEach(() => {
+      mockSay.mockClear();
+      t.channelConfig.shouldUseEphemeralMessaging = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.getEphemeralTargetUsers = jest.fn().mockResolvedValue([]);
+      t.channelConfig.getEphemeralTargetChannels = jest
+        .fn()
+        .mockResolvedValue([]);
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(true);
+      t.channelConfig.getChannelName = jest.fn().mockResolvedValue("general");
+    });
+
+    it("shows SKIPPED reaction when shouldNotRespond is true and no approvable action", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: ["some response"],
+        shouldNotRespond: true,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(t.reactionManager.updateReaction).toHaveBeenCalledWith(
+        expect.any(String),
+        "see_no_evil", // REACTIONS.SKIPPED
+      );
+    });
+
+    it("does not set a reaction when an approvable action was invoked (registry owns the lifecycle)", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: ["some response"],
+        shouldNotRespond: true,
+        toolCallNames: ["mcp__approvable-actions__test-action"],
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(t.reactionManager.updateReaction).not.toHaveBeenCalled();
+    });
+
+    it("shows COMPLETE reaction when shouldNotRespond is false (normal reply)", async () => {
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      const event = makeEvent();
+      const result = {
+        messages: ["some response"],
+        shouldNotRespond: false,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(t.reactionManager.updateReaction).toHaveBeenCalledWith(
+        expect.any(String),
+        "white_check_mark", // REACTIONS.COMPLETE
       );
     });
   });
