@@ -49,13 +49,15 @@ export interface SlackContext {
   messageTs?: string;
   /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
   messageText?: string;
+  /** Prior human-user messages in the thread (excludes bots and the current message). */
+  threadUserText?: string;
   explicitMention?: boolean;
   replyBroadcast?: boolean;
   /** True when the channel is a non-ephemeral conditional reply channel
    *  (the bot is the primary responder and messages are directed at it). */
   isNonEphemeralConditionalChannel?: boolean;
   /** SlackHandler reaction key for this message. Only set when bot lifecycle
-   *  reactions are enabled (non-ephemeral contexts), so approvable actions can
+   *  reactions are enabled (non-ephemeral contexts), so custom actions can
    *  update the reaction through the session path while the turn is live. */
   reactionKey?: string;
   /** Per-thread agent workspace; used for cwd and sandbox writes. */

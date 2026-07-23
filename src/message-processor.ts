@@ -21,12 +21,18 @@ export interface MessageProcessorResult {
   debugLogs?: string[];
   toolCalls?: string[];
   toolCallNames?: string[];
+  /** True when an custom action posted a confirmation dialog this turn. */
+  confirmationDialogPosted?: boolean;
   tokenUsage?: TokenUsage;
   turnCount?: number;
   /** Total Claude API cost (USD) for this message, from the SDK result message. */
   costUsd?: number;
   phaseTimings?: PhaseTimings;
 }
+
+/** Tool results that tell the agent not to send a follow-up chat message. */
+const CUSTOM_ACTION_SUPPRESSES_REPLY =
+  /confirmation dialog has been posted|Do not send any additional text response to the user/i;
 
 export class MessageProcessor {
   private logger = new Logger("MessageProcessor");
@@ -105,6 +111,7 @@ export class MessageProcessor {
     const debugLogs: string[] = [];
     const toolCalls: string[] = [];
     const toolCallNames: string[] = [];
+    let confirmationDialogPosted = false;
     let shouldNotRespond = false;
     let tokenUsage: TokenUsage | undefined;
     let costUsd: number | undefined;
@@ -171,15 +178,6 @@ export class MessageProcessor {
           allowFullLogging,
         );
 
-        // Approvable actions post their own confirmation dialog; mute the
-        // standard reply so users don't see a duplicate preamble.
-        if (
-          !shouldNotRespond &&
-          toolCallNames.some(n => n.startsWith("mcp__approvable-actions__"))
-        ) {
-          shouldNotRespond = true;
-        }
-
         // Check for special responses
         const content = this.extractTextContent(message);
         if (
@@ -196,12 +194,18 @@ export class MessageProcessor {
         }
       } else if (message.type === "user") {
         // Handle tool result messages (user messages with tool_result content)
-        this.processToolResultMessage(
+        const suppressReply = this.processToolResultMessage(
           message,
           isDebugMode,
           debugLogs,
           allowFullLogging,
         );
+        if (suppressReply?.confirmationDialogPosted) {
+          confirmationDialogPosted = true;
+        }
+        if (suppressReply?.shouldNotRespond) {
+          shouldNotRespond = true;
+        }
       } else if (message.type === "result") {
         await this.processResultMessage(message, currentMessages);
 
@@ -266,6 +270,7 @@ export class MessageProcessor {
       debugLogs: isDebugMode ? debugLogs : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolCallNames: toolCallNames.length > 0 ? toolCallNames : undefined,
+      confirmationDialogPosted: confirmationDialogPosted || undefined,
       tokenUsage,
       costUsd,
       turnCount: turnCount > 0 ? turnCount : undefined,
@@ -392,10 +397,15 @@ export class MessageProcessor {
     isDebugMode?: boolean,
     debugLogs?: string[],
     allowFullLogging?: boolean,
-  ): void {
+  ):
+    | { confirmationDialogPosted?: boolean; shouldNotRespond?: boolean }
+    | undefined {
     const content =
       (message as any).message?.content || (message as any).content;
     if (!Array.isArray(content)) return;
+
+    let suppressReply = false;
+    let dialogPosted = false;
 
     for (const block of content) {
       if (block.type === "tool_result") {
@@ -421,8 +431,21 @@ export class MessageProcessor {
           isDebugMode,
           debugLogs,
         );
+
+        if (CUSTOM_ACTION_SUPPRESSES_REPLY.test(resultContent)) {
+          suppressReply = true;
+          if (/confirmation dialog has been posted/i.test(resultContent)) {
+            dialogPosted = true;
+          }
+        }
       }
     }
+
+    if (!suppressReply && !dialogPosted) return;
+    return {
+      confirmationDialogPosted: dialogPosted || undefined,
+      shouldNotRespond: suppressReply || undefined,
+    };
   }
 
   /**

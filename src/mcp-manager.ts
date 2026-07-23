@@ -27,6 +27,13 @@ export type McpSSEServerConfig = {
   type: "sse";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * Shell command the Claude CLI runs on each connection; its stdout (a JSON
+   * object) is merged over `headers`. Lets short-lived credentials (e.g. a
+   * service-account token a cron job refreshes on disk) stay fresh without
+   * regenerating mcp-servers.json.
+   */
+  headersHelper?: string;
   /** See {@link bindUserToMcpServers}. Not passed through to the SDK. */
   userEmailHeader?: string;
 };
@@ -35,6 +42,8 @@ export type McpHttpServerConfig = {
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /** See {@link McpSSEServerConfig.headersHelper}. */
+  headersHelper?: string;
   /** See {@link bindUserToMcpServers}. Not passed through to the SDK. */
   userEmailHeader?: string;
 };
