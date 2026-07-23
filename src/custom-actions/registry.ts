@@ -6,15 +6,16 @@ import { generateMessageId } from "../tracking";
 import { withMessageId } from "../logger";
 import { config } from "../config";
 import { PersistentMap } from "../persistent-map";
+import type { SlackBlock } from "../types";
 import type {
-  ApprovableAction,
+  CustomAction,
   ActionSlackContext,
   ActionDependencies,
   PendingActionSession,
 } from "./types";
 
 /**
- * Central registry for all approvable actions.
+ * Central registry for all custom actions.
  *
  * Responsibilities:
  * - Registers action definitions at startup
@@ -24,14 +25,14 @@ import type {
  * - Dispatches approve/cancel button clicks to the correct action
  * - Purges stale sessions
  */
-export class ApprovableActionRegistry {
+export class CustomActionRegistry {
   private app: App;
   private reactionManager: ReactionManager;
-  private actions = new Map<string, ApprovableAction<any>>();
+  private actions = new Map<string, CustomAction<any>>();
   private pendingSessions = new PersistentMap<PendingActionSession>(
     join(config.persistDir, "pending-sessions.json"),
   );
-  private logger = new Logger("ApprovableActionRegistry");
+  private logger = new Logger("CustomActionRegistry");
 
   constructor(app: App, reactionManager: ReactionManager) {
     this.app = app;
@@ -42,14 +43,14 @@ export class ApprovableActionRegistry {
   // Registration
   // ------------------------------------------------------------------
 
-  register(action: ApprovableAction<any>): void {
+  register(action: CustomAction<any>): void {
     if (this.actions.has(action.name)) {
       this.logger.warn("Overwriting existing action registration", {
         name: action.name,
       });
     }
     this.actions.set(action.name, action);
-    this.logger.info("Registered approvable action", { name: action.name });
+    this.logger.info("Registered custom action", { name: action.name });
   }
 
   // ------------------------------------------------------------------
@@ -65,16 +66,31 @@ export class ApprovableActionRegistry {
    */
   async createMcpServerConfig(
     slackContext: ActionSlackContext,
+    filter?: (action: CustomAction<any>) => boolean,
   ): Promise<Record<string, any>> {
     // Dynamic ESM import (same pattern as claude-handler.ts)
     const { createSdkMcpServer, tool } = await eval(
       'import("@anthropic-ai/claude-agent-sdk")',
     );
 
-    const tools: any[] = [];
+    const actions = [...this.actions.values()].filter(
+      action => !filter || filter(action),
+    );
+    if (actions.length === 0) {
+      return {};
+    }
 
-    for (const action of this.actions.values()) {
-      tools.push(
+    const byServer = new Map<string, CustomAction<any>[]>();
+    for (const action of actions) {
+      const serverName = action.mcpServerName ?? "custom-actions";
+      const bucket = byServer.get(serverName) ?? [];
+      bucket.push(action);
+      byServer.set(serverName, bucket);
+    }
+
+    const servers: Record<string, any> = {};
+    for (const [serverName, serverActions] of byServer) {
+      const tools = serverActions.map(action =>
         tool(
           action.name,
           action.description,
@@ -84,14 +100,13 @@ export class ApprovableActionRegistry {
           },
         ),
       );
+      servers[serverName] = createSdkMcpServer({
+        name: serverName,
+        tools,
+      });
     }
 
-    const server = createSdkMcpServer({
-      name: "approvable-actions",
-      tools,
-    });
-
-    return { "approvable-actions": server };
+    return servers;
   }
 
   // ------------------------------------------------------------------
@@ -99,7 +114,7 @@ export class ApprovableActionRegistry {
   // ------------------------------------------------------------------
 
   /**
-   * Set the lifecycle reaction on the original user message for an approvable
+   * Set the lifecycle reaction on the original user message for a custom
    * action (waiting-on-human → complete / error). Routed through the
    * session-tracked updateReaction so the reaction state stays consistent
    * across the whole lifecycle — including the later approve/cancel, which the
@@ -118,7 +133,7 @@ export class ApprovableActionRegistry {
    * Run a confirmation-flow step; if it throws (e.g. buildConfirmationBlocks or
    * Slack postMessage fails) mark the original message ERROR before rethrowing.
    * Without this the turn stays stuck on the tool-use reaction, since
-   * sendResponse cedes the reaction once an approvable action is invoked.
+   * sendResponse cedes the reaction once an custom action is invoked.
    */
   private async runConfirmationStep<T>(
     ctx: ActionSlackContext,
@@ -149,6 +164,39 @@ export class ApprovableActionRegistry {
           { type: "text" as const, text: `Unknown action: ${actionName}` },
         ],
       };
+    }
+
+    // ---- Immediate execution (no human approval) ----
+    if (action.requiresApproval === false) {
+      if (!action.invoke) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Action "${actionName}" is misconfigured: requiresApproval is false but invoke is missing.`,
+            },
+          ],
+        };
+      }
+
+      try {
+        const text = await action.invoke(params, ctx);
+        return { content: [{ type: "text" as const, text }] };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn("Immediate action invoke failed", {
+          actionName,
+          message,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error in ${actionName}: ${message}`,
+            },
+          ],
+        };
+      }
     }
 
     // ---- YOLO-emoji bypass ----
@@ -254,10 +302,27 @@ export class ApprovableActionRegistry {
     // SlackHandler flow already owns that message's reaction lifecycle. The
     // confirmation dialog itself communicates "waiting for approval."
 
-    // Build confirmation blocks from the action
-    const confirmationBlocks = await this.runConfirmationStep(ctx, () =>
-      action.buildConfirmationBlocks(params, ctx),
-    );
+    // Build confirmation blocks from the action. Validation failures (e.g.
+    // project key not named in chat) are expected — log and return guidance
+    // to the agent without setting an ERROR reaction on the user's message.
+    let confirmationBlocks: SlackBlock[];
+    try {
+      confirmationBlocks = await action.buildConfirmationBlocks(params, ctx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.info("Action rejected before confirmation", {
+        actionName,
+        message,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Cannot proceed with ${actionName}: ${message}`,
+          },
+        ],
+      };
+    }
 
     // Add approve/cancel buttons
     const blocks = [
@@ -321,7 +386,7 @@ export class ApprovableActionRegistry {
 
     // The bot is now waiting on a human to approve/cancel — reflect that on the
     // original message. The registry owns this reaction until the action
-    // resolves (sendResponse defers for approvable actions).
+    // resolves (sendResponse defers for custom actions).
     await this.setActionReaction(ctx, REACTIONS.WAITING_ON_HUMAN);
 
     return {

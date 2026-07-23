@@ -6,11 +6,8 @@ import { ClaudeHandler } from "./claude-handler";
 import { SlackHandler } from "./slack-handler";
 import { McpManager } from "./mcp-manager";
 import { ReactionManager } from "./reaction-manager";
-import {
-  ApprovableActionRegistry,
-  loadApprovableActions,
-} from "./approvable-actions";
-import { startActiveWorkflowCleanup } from "../config/approvable-actions/create-pr-via-temporal";
+import { CustomActionRegistry, loadCustomActions } from "./custom-actions";
+import { startActiveWorkflowCleanup } from "../config/custom-actions/create-pr-via-temporal";
 import { Logger } from "./logger";
 import { UserUtils } from "./user-utils";
 import { initTracking } from "./tracking";
@@ -40,8 +37,8 @@ async function start() {
 
     const reactionManager = new ReactionManager(app);
 
-    const registry = new ApprovableActionRegistry(app, reactionManager);
-    const actions = await loadApprovableActions();
+    const registry = new CustomActionRegistry(app, reactionManager);
+    const actions = await loadCustomActions();
     for (const action of actions) {
       registry.register(action);
     }
@@ -108,6 +105,7 @@ async function start() {
       baseDirectory: config.baseDirectory,
       mcpServers: mcpConfig ? Object.keys(mcpConfig.mcpServers).length : 0,
       mcpServerNames: mcpConfig ? Object.keys(mcpConfig.mcpServers) : [],
+      customActions: actions.length,
     });
   } catch (error) {
     logger.error("Failed to start the bot", error);

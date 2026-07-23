@@ -14,6 +14,8 @@ export interface ActionSlackContext {
   messageTs: string;
   /** Raw text of the incoming Slack message (used for emoji-based bypasses). */
   messageText?: string;
+  /** Prior human-user messages in the thread (excludes bots and the current message). */
+  threadUserText?: string;
   workflowId?: string;
   botId?: string;
   /** SlackHandler reaction key. Only set when bot lifecycle reactions are
@@ -41,17 +43,39 @@ export interface ActionDependencies {
 }
 
 /**
- * Every approvable action must implement this interface.
+ * Every custom action must implement this interface.
  *
  * TParams is the Zod-inferred parameter type for the MCP tool.
  */
-export interface ApprovableAction<TParams> {
-  /** MCP tool name suffix (full name becomes mcp__approvable-actions__<name>) */
+export interface CustomAction<TParams> {
+  /** MCP tool name suffix (full name becomes mcp__<mcpServerName>__<name>) */
   name: string;
   /** Claude reads this to decide when to call the tool */
   description: string;
+  /** MCP server namespace. Defaults to "custom-actions". */
+  mcpServerName?: string;
+  /**
+   * When false, `invoke` runs immediately with no confirmation dialog.
+   * Defaults to true (human-in-the-loop).
+   */
+  requiresApproval?: boolean;
+  /**
+   * When set, the loader skips this action if the callback returns false
+   * (e.g. when required credentials are unset).
+   */
+  enabled?: () => boolean;
+  /**
+   * When true, tools are registered on every turn — not only when
+   * `shouldInjectActions` is true (e.g. read-only tools always available).
+   */
+  alwaysInject?: boolean;
   /** Zod raw shape for the tool input schema */
   inputSchema: Record<string, any>;
+  /**
+   * Immediate execution when `requiresApproval` is false. Returns MCP result
+   * text. Unused when `requiresApproval` is true (the default).
+   */
+  invoke?(params: TParams, ctx: ActionSlackContext): Promise<string>;
   /** Build Slack Block Kit blocks for the confirmation dialog */
   buildConfirmationBlocks(
     params: TParams,

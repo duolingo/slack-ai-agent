@@ -1,7 +1,7 @@
 /**
- * Unit tests for the approvable-action reaction lifecycle.
+ * Unit tests for the custom-action reaction lifecycle.
  *
- * Once an approvable action is invoked, SlackHandler.sendResponse cedes the
+ * Once an custom action is invoked, SlackHandler.sendResponse cedes the
  * original message's reaction to the registry, which owns the whole lifecycle:
  * waiting-on-human → complete / error for the confirmation flow, and
  * complete / error directly for YOLO auto-approvals (no human to wait on).
@@ -26,10 +26,10 @@ jest.mock("../tracking", () => ({
   generateMessageId: jest.fn(() => "test-msg-id"),
 }));
 
-import { ApprovableActionRegistry } from "./registry";
+import { CustomActionRegistry } from "./registry";
 import { REACTIONS } from "../reaction-manager";
 
-describe("ApprovableActionRegistry reaction lifecycle", () => {
+describe("CustomActionRegistry reaction lifecycle", () => {
   const ORIGINAL_CHANNEL = "C123";
   const ORIGINAL_TS = "1700000000.000100";
   const REACTION_KEY = "react-key-abc";
@@ -37,7 +37,7 @@ describe("ApprovableActionRegistry reaction lifecycle", () => {
   let app: any;
   let reactionManager: any;
   let handlers: Record<string, any>;
-  let registry: ApprovableActionRegistry;
+  let registry: CustomActionRegistry;
 
   const makeCtx = (overrides: Record<string, any> = {}): any => ({
     userId: "U123",
@@ -105,7 +105,7 @@ describe("ApprovableActionRegistry reaction lifecycle", () => {
       updateReaction: jest.fn().mockResolvedValue(undefined),
       registerMessage: jest.fn(),
     };
-    registry = new ApprovableActionRegistry(app, reactionManager);
+    registry = new CustomActionRegistry(app, reactionManager);
   });
 
   it("sets waiting-on-human on the original message when a confirmation dialog is posted", async () => {
@@ -225,6 +225,24 @@ describe("ApprovableActionRegistry reaction lifecycle", () => {
       REACTION_KEY,
       REACTIONS.ERROR,
     );
+  });
+
+  it("invokes immediately when requiresApproval is false", async () => {
+    const action = makeAction({
+      requiresApproval: false,
+      invoke: jest.fn().mockResolvedValue("doc body"),
+    });
+    registry.register(action);
+
+    const result = await (registry as any).handleToolCall(
+      "test-action",
+      { url: "https://example.com" },
+      makeCtx(),
+    );
+
+    expect(action.invoke).toHaveBeenCalled();
+    expect(result.content[0].text).toBe("doc body");
+    expect(app.client.chat.postMessage).not.toHaveBeenCalled();
   });
 
   it("resolves the reaction to error when approving an action missing from the registry", async () => {

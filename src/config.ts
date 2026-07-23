@@ -94,9 +94,38 @@ const SANDBOX_FILESYSTEM_RULES = {
   allowRead: [".", "~/.config/gcloud"],
 } as const;
 
+/**
+ * Per-cwd Claude project dirs (~/.claude/projects/<slug>). When a tool result
+ * exceeds the output token limit, the Claude CLI persists it under
+ * <project>/<session>/tool-results/ and points the agent at that path, so
+ * the dir must be readable despite the $HOME denyRead. The slug mirrors the
+ * CLI's own project-dir naming (every non-alphanumeric character becomes
+ * "-"), applied to both the given cwd and its realpath — the CLI slugs its
+ * resolved cwd, so a symlinked workspace (macOS /tmp → /private/tmp)
+ * persists under the physical slug. Either way the carve-out stays scoped
+ * to this thread workspace's sessions — other threads' project dirs stay
+ * hidden.
+ */
+const claudeProjectDirs = (workingDirectory: string): string[] => {
+  const dirs = new Set([workingDirectory]);
+  try {
+    dirs.add(fs.realpathSync(workingDirectory));
+  } catch {
+    // Workspace not provisioned yet (unit tests); the logical path is the
+    // best guess.
+  }
+  return [...dirs].map(
+    dir => `~/.claude/projects/${dir.replace(/[^a-zA-Z0-9]/g, "-")}`,
+  );
+};
+
 /** Bash sandbox filesystem rules scoped to a thread workspace cwd. */
 export const buildSandboxFilesystem = (workingDirectory: string) => ({
-  ...SANDBOX_FILESYSTEM_RULES,
+  denyRead: [...SANDBOX_FILESYSTEM_RULES.denyRead],
+  allowRead: [
+    ...SANDBOX_FILESYSTEM_RULES.allowRead,
+    ...claudeProjectDirs(workingDirectory),
+  ],
   allowWrite: [workingDirectory, "~/.config/gcloud"],
 });
 

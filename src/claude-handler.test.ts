@@ -27,6 +27,9 @@ jest.mock("./validation-agent", () => ({
   loadSubagentDefinitions: jest.fn(() => ({})),
 }));
 
+import fs from "fs";
+import os from "os";
+import path from "path";
 import {
   ClaudeHandler,
   DEFAULT_SESSION_MAX_AGE_MS,
@@ -408,7 +411,44 @@ describe("SANDBOX_FILESYSTEM", () => {
     const rules = buildSandboxFilesystem(threadWorkspace);
     expect(rules.allowWrite).toEqual([threadWorkspace, "~/.config/gcloud"]);
     expect(rules.denyRead).toEqual(SANDBOX_FILESYSTEM.denyRead);
-    expect(rules.allowRead).toEqual(SANDBOX_FILESYSTEM.allowRead);
+  });
+
+  // The CLI persists oversized tool outputs under
+  // ~/.claude/projects/<slugified-cwd>/ and tells the agent to read them
+  // back from there. The slug is per thread workspace, so other threads'
+  // session artifacts stay hidden behind the $HOME denyRead.
+  it("lets the agent read back its own persisted oversized tool outputs", () => {
+    const rules = buildSandboxFilesystem(
+      "/tmp/slack-ai-agent/workspaces/U1-C2-1.1",
+    );
+    expect(rules.allowRead).toEqual([
+      ".",
+      "~/.config/gcloud",
+      "~/.claude/projects/-tmp-slack-ai-agent-workspaces-U1-C2-1-1",
+    ]);
+  });
+
+  // The CLI slugs its *resolved* cwd, so when the workspace path contains a
+  // symlink (macOS /tmp → /private/tmp) the persisted outputs land under the
+  // physical path's slug, which must be readable too.
+  it("also lets the agent read the project dir of a symlink-resolved cwd", () => {
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), "ws-target-"));
+    const link = `${target}-link`;
+    fs.symlinkSync(target, link);
+    try {
+      const rules = buildSandboxFilesystem(link);
+      expect(rules.allowRead).toContain(
+        `~/.claude/projects/${link.replace(/[^a-zA-Z0-9]/g, "-")}`,
+      );
+      expect(rules.allowRead).toContain(
+        `~/.claude/projects/${fs
+          .realpathSync(link)
+          .replace(/[^a-zA-Z0-9]/g, "-")}`,
+      );
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(target, { recursive: true, force: true });
+    }
   });
 });
 
