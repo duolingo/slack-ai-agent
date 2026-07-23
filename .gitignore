@@ -27,8 +27,8 @@ config/*
 !config/example-*.yaml
 config/instructions/*
 !config/instructions/example-*.txt
-config/approvable-actions/*
-!config/approvable-actions/example-*.ts
+config/custom-actions/*
+!config/custom-actions/example-*.ts
 config/subagents/*.yaml
 !config/subagents/example-*.yaml
 
