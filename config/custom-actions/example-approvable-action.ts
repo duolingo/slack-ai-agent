@@ -4,7 +4,7 @@
  * Custom actions are tools loaded from config/custom-actions/.
  * By default they require human confirmation before executing; set
  * `requiresApproval: false` and implement `invoke()` for immediate tools
- * (e.g. read-only DUALIPA Google Doc access).
+ * (e.g. read-only Google Doc access).
  *
  * To create your own:
  * 1. Copy this file and rename it (e.g. create-ticket.ts)
