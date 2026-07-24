@@ -231,29 +231,6 @@ describe("SlackHandler", () => {
     });
   });
 
-  describe("splitMessageForSlack", () => {
-    const split = (text: string, max?: number) =>
-      priv(handler).splitMessageForSlack(text, max);
-
-    it("returns single chunk for short messages", () => {
-      expect(split("hello", 100)).toEqual(["hello"]);
-    });
-
-    it("splits long messages into chunks", () => {
-      const text = "a".repeat(100);
-      const chunks = split(text, 30);
-      expect(chunks.length).toBe(4); // 100 / 30 = 3.33 → 4 chunks
-      // Each chunk should have part indicator
-      expect(chunks[0]).toContain("[Part 1/4]");
-      expect(chunks[3]).toContain("[Part 4/4]");
-    });
-
-    it("does not add part indicators for single chunk", () => {
-      const chunks = split("short", 100);
-      expect(chunks[0]).not.toContain("[Part");
-    });
-  });
-
   describe("createSafeButtonValue", () => {
     const safe = (data: any) => priv(handler).createSafeButtonValue(data);
 
@@ -597,6 +574,22 @@ describe("SlackHandler", () => {
       expect(result).toBe(false);
     });
 
+    it("skips Slackbot messages without explicit mention", async () => {
+      const event = makeEvent({ user: "USLACKBOT", text: "Reminder: hi" });
+      const result = await priv(handler).shouldSkipMessage(event);
+      expect(result).toBe(true);
+    });
+
+    it("does NOT skip Slackbot message with explicitMention", async () => {
+      const event = makeEvent({
+        user: "USLACKBOT",
+        explicitMention: true,
+        text: "Reminder: hello",
+      });
+      const result = await priv(handler).shouldSkipMessage(event);
+      expect(result).toBe(false);
+    });
+
     it("skips messages with PSA marker", async () => {
       const event = makeEvent({ text: "PSA: new deploy" });
       const result = await priv(handler).shouldSkipMessage(event);
@@ -645,6 +638,17 @@ describe("SlackHandler", () => {
         mockSay,
       );
       expect(result).toBe(false);
+    });
+
+    it("does not reject Slackbot messages", async () => {
+      (UserUtils.getUserRole as jest.Mock).mockResolvedValue("none");
+      const event = makeEvent({ user: "USLACKBOT", explicitMention: true });
+      const result = await priv(handler).shouldRejectNonMemberRequest(
+        event,
+        mockSay,
+      );
+      expect(result).toBe(false);
+      expect(mockSay).not.toHaveBeenCalled();
     });
 
     it("does not reject authorized members", async () => {
@@ -892,6 +896,26 @@ describe("SlackHandler", () => {
       expect(normalized.text).toBe("Please ask <@U123> about this,");
     });
 
+    it("detects legacy <@ID|label> mention format (e.g. Slackbot reminders)", async () => {
+      const event = makeEvent({
+        text: 'Reminder: Send "<@UBOTID|mybot> what is 2+2?".',
+      });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.explicitMention).toBe(true);
+      expect(normalized.text).toBe('Reminder: Send " what is 2+2?".');
+    });
+
+    it("does not strip labeled mentions of other users", async () => {
+      const event = makeEvent({
+        text: "ask <@U123|someone> instead",
+      });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.explicitMention).toBe(false);
+      expect(normalized.text).toBe("ask <@U123|someone> instead");
+    });
+
     it("does not flag mention when bot ID is missing", async () => {
       t.app.client.auth.test.mockResolvedValue({ user_id: "" });
       const event = makeEvent({ text: "<@UBOTID> help" });
@@ -985,7 +1009,7 @@ describe("SlackHandler", () => {
       t.channelConfig.getChannelName = jest.fn().mockResolvedValue("general");
     });
 
-    it("shows SKIPPED reaction when shouldNotRespond is true and no approvable action", async () => {
+    it("shows SKIPPED reaction when shouldNotRespond is true and no custom action", async () => {
       const event = makeEvent();
       const result = {
         messages: ["some response"],
@@ -998,12 +1022,12 @@ describe("SlackHandler", () => {
       );
     });
 
-    it("does not set a reaction when an approvable action was invoked (registry owns the lifecycle)", async () => {
+    it("does not set a reaction when an custom action was invoked (registry owns the lifecycle)", async () => {
       const event = makeEvent();
       const result = {
         messages: ["some response"],
         shouldNotRespond: true,
-        toolCallNames: ["mcp__approvable-actions__test-action"],
+        confirmationDialogPosted: true,
       };
       await priv(handler).sendResponse(event, result, mockSay, Date.now());
       expect(t.reactionManager.updateReaction).not.toHaveBeenCalled();

@@ -11,7 +11,7 @@ import {
 } from "./config";
 import { UserUtils } from "./user-utils";
 import { loadSubagentDefinitions } from "./validation-agent";
-import type { ApprovableActionRegistry } from "./approvable-actions";
+import type { CustomActionRegistry } from "./custom-actions";
 import { OPUS_MODEL, RequestMode, SONNET_MODEL } from "./request-mode";
 import { OpusHealthMonitor } from "./opus-health";
 
@@ -57,7 +57,7 @@ export const buildSanitizedEnv = (): Record<string, string | undefined> => {
 };
 
 /**
- * Determine whether approvable actions should be injected for a given Slack context.
+ * Determine whether custom actions should be injected for a given Slack context.
  * Actions are appropriate in DMs, explicit @-mentions, non-ephemeral conditional
  * reply channels, or workflow-triggered messages.
  */
@@ -88,7 +88,7 @@ export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
   private logger = new Logger("ClaudeHandler");
   private mcpManager: McpManager;
-  private approvableActionRegistry?: ApprovableActionRegistry;
+  private customActionRegistry?: CustomActionRegistry;
   private opusHealthMonitor: OpusHealthMonitor;
   private retryOptions: RetryOptions = {
     maxRetries: 3, // Reduced retry attempts for faster failure detection
@@ -98,11 +98,11 @@ export class ClaudeHandler {
 
   constructor(
     mcpManager: McpManager,
-    approvableActionRegistry?: ApprovableActionRegistry,
+    customActionRegistry?: CustomActionRegistry,
     opusHealthMonitor: OpusHealthMonitor = new OpusHealthMonitor(),
   ) {
     this.mcpManager = mcpManager;
-    this.approvableActionRegistry = approvableActionRegistry;
+    this.customActionRegistry = customActionRegistry;
     this.opusHealthMonitor = opusHealthMonitor;
   }
 
@@ -335,11 +335,7 @@ export class ClaudeHandler {
       options.mcpServers = servers;
     }
 
-    if (
-      this.approvableActionRegistry &&
-      slackContext &&
-      shouldInjectActions(slackContext)
-    ) {
+    if (this.customActionRegistry && slackContext) {
       try {
         const actionSlackCtx = {
           // Workflow/bot-triggered messages have no `event.user`, so
@@ -357,21 +353,27 @@ export class ClaudeHandler {
           threadTs: slackContext.threadTs,
           messageTs: slackContext.messageTs || "",
           messageText: slackContext.messageText,
+          threadUserText: slackContext.threadUserText,
           workflowId: slackContext.workflowId,
           botId: slackContext.botId,
           reactionKey: slackContext.reactionKey,
           workingDirectory: slackContext.workingDirectory,
         };
-        const actionServers =
-          await this.approvableActionRegistry.createMcpServerConfig(
+
+        const injectAllActions = shouldInjectActions(slackContext);
+        const customActionServers =
+          await this.customActionRegistry.createMcpServerConfig(
             actionSlackCtx,
+            injectAllActions
+              ? undefined
+              : action => action.alwaysInject === true,
           );
         options.mcpServers = {
           ...(options.mcpServers || {}),
-          ...actionServers,
+          ...customActionServers,
         };
       } catch (error) {
-        this.logger.error("Failed to create approvable-actions MCP server", {
+        this.logger.error("Failed to create custom MCP tool servers", {
           error,
         });
       }

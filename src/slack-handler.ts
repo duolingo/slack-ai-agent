@@ -10,6 +10,7 @@ import {
   MODE_TRIGGER_EMOJIS,
 } from "./reaction-manager";
 import { MessageProcessor } from "./message-processor";
+import { splitMessageForSlack } from "./message-splitter";
 import { resolveMode } from "./request-mode";
 import {
   MessageEvent,
@@ -34,6 +35,25 @@ import {
 } from "./constants";
 import * as fs from "fs";
 import * as path from "path";
+
+interface ThreadData {
+  context: string | null;
+  userText?: string;
+}
+
+// Slackbot (reminders, workspace notices) posts under this fixed user ID with
+// no bot_id or bot_message subtype, so bot_id checks alone miss it.
+const SLACKBOT_USER_ID = "USLACKBOT";
+
+/** True when a message was authored by a bot, a workflow, or Slackbot. */
+const isBotAuthoredMessage = (msg: {
+  bot_id?: string;
+  subtype?: string;
+  user?: string;
+}): boolean =>
+  !!msg.bot_id ||
+  msg.subtype === "bot_message" ||
+  msg.user === SLACKBOT_USER_ID;
 
 export class SlackHandler {
   private app: App;
@@ -753,7 +773,7 @@ export class SlackHandler {
     say: any,
   ): Promise<boolean> {
     // Skip validation for bot messages
-    if (event.bot_id || event.subtype === "bot_message") {
+    if (isBotAuthoredMessage(event)) {
       return false;
     }
 
@@ -808,7 +828,7 @@ export class SlackHandler {
    */
   private async shouldSkipMessage(event: MessageEvent): Promise<boolean> {
     // Skip bot messages unless explicitly mentioned or channel allows bot messages
-    if (event.bot_id || event.subtype === "bot_message") {
+    if (isBotAuthoredMessage(event)) {
       if (event.explicitMention) return false;
 
       const channelName = await this.channelConfig.getChannelName(
@@ -910,11 +930,7 @@ export class SlackHandler {
   ): Promise<boolean> {
     // Bot messages that reach here already passed shouldSkipMessage()
     // (via explicitMention or allowBotMessages) — don't block them.
-    if (
-      event.explicitMention ||
-      event.bot_id ||
-      event.subtype === "bot_message"
-    ) {
+    if (event.explicitMention || isBotAuthoredMessage(event)) {
       return false;
     }
     return this.hasTwoOrMoreHumanParticipants(
@@ -1000,10 +1016,13 @@ export class SlackHandler {
   ) {
     const promptStart = Date.now();
 
+    const threadData = await this.getThreadData(event);
+
     // Prepare final prompt and system prompt separately
     const { userPrompt, systemPrompt } = await this.prepareFinalPrompt(
       event,
       processedFiles,
+      threadData,
     );
     if (timings) {
       timings.prompt_assembly_ms = Date.now() - promptStart;
@@ -1019,6 +1038,7 @@ export class SlackHandler {
       workflowId: event.workflow_id,
       messageTs: event.ts,
       messageText: event.text,
+      threadUserText: threadData.userText,
       explicitMention: event.explicitMention,
       replyBroadcast: event.replyBroadcast,
       isNonEphemeralConditionalChannel: isNonEphemeralConditional ?? false,
@@ -1077,6 +1097,7 @@ export class SlackHandler {
   private async prepareFinalPrompt(
     event: MessageEvent,
     processedFiles: ProcessedFile[],
+    threadData?: ThreadData,
   ): Promise<{ userPrompt: string; systemPrompt: string }> {
     // Build the system prompt from context files
     const generalContext = await this.channelConfig.getGeneralContextForChannel(
@@ -1137,7 +1158,10 @@ export class SlackHandler {
     }
 
     // 4. Thread context (if in a thread)
-    const threadContext = await this.getThreadContext(event);
+    const threadContext =
+      threadData !== undefined
+        ? threadData.context
+        : await this.getThreadContext(event);
     if (threadContext) {
       sections.push(`## Thread Context:\n${threadContext}`);
     }
@@ -1166,7 +1190,24 @@ export class SlackHandler {
    * This is a shared method used by SlackHandler and other components
    */
   async getThreadContext(event: MessageEvent | any): Promise<string | null> {
-    // If not a thread message, no context to fetch
+    return (await this.getThreadData(event)).context;
+  }
+
+  /** Prior human-user text and formatted context from the current thread. */
+  async getThreadData(event: MessageEvent | any): Promise<ThreadData> {
+    const messages = await this.fetchThreadReplies(event);
+    if (!messages) {
+      return { context: null };
+    }
+
+    const context = await this.formatThreadContext(messages, event);
+    const userText = this.extractThreadUserText(messages, event);
+    return { context, userText };
+  }
+
+  private async fetchThreadReplies(
+    event: MessageEvent | any,
+  ): Promise<any[] | null> {
     if (!event.thread_ts) {
       return null;
     }
@@ -1175,66 +1216,15 @@ export class SlackHandler {
       const resp = await this.app.client.conversations.replies({
         channel: event.channel,
         ts: event.thread_ts,
-        limit: 50, // Get last 50 messages in thread
+        limit: 50,
       });
 
       const messages = (resp.messages as any[]) || [];
       if (messages.length <= 1) {
-        // Only the root message or no messages
         return null;
       }
 
-      // Filter out the current message and format the context
-      const previousMessages = messages.filter(msg => msg.ts !== event.ts);
-      const contextLines: string[] = [];
-
-      for (const msg of previousMessages) {
-        // Skip messages without text, files, or blocks
-        if (!msg.text && !msg.files && !msg.blocks && !msg.attachments) {
-          continue;
-        }
-
-        // Get user display name (handle both users and bots)
-        let userDisplay = `<@${msg.user}>`;
-        if (msg.user) {
-          const userHandle = await UserUtils.getSlackHandle(this.app, msg.user);
-          if (userHandle) {
-            userDisplay = userHandle;
-          }
-        } else if (msg.bot_id) {
-          // For bot messages, use bot_id or a generic bot identifier
-          userDisplay = `Bot (${msg.bot_id})`;
-        }
-
-        // Format message text (combine plain text with block content)
-        let messageText = this.getCombinedText(
-          msg.text,
-          msg.blocks,
-          msg.attachments,
-        );
-
-        // Handle files if present
-        if (msg.files && msg.files.length > 0) {
-          const fileNames = msg.files
-            .map((f: any) => f.name || "unknown file")
-            .join(", ");
-          messageText = messageText
-            ? `${messageText} [Files: ${fileNames}]`
-            : `[Files: ${fileNames}]`;
-        }
-
-        if (messageText.trim()) {
-          // Clean up Slack formatting for better readability
-          messageText = this.cleanSlackFormatting(messageText);
-          contextLines.push(`**${userDisplay}**: ${messageText}`);
-        }
-      }
-
-      if (contextLines.length === 0) {
-        return null;
-      }
-
-      return contextLines.join("\n\n");
+      return messages;
     } catch (error) {
       this.logger.warn("Failed to fetch thread context", {
         channel: event.channel,
@@ -1243,6 +1233,83 @@ export class SlackHandler {
       });
       return null;
     }
+  }
+
+  private async formatThreadContext(
+    messages: any[],
+    event: MessageEvent | any,
+  ): Promise<string | null> {
+    const previousMessages = messages.filter(msg => msg.ts !== event.ts);
+    const contextLines: string[] = [];
+
+    for (const msg of previousMessages) {
+      if (!msg.text && !msg.files && !msg.blocks && !msg.attachments) {
+        continue;
+      }
+
+      let userDisplay = `<@${msg.user}>`;
+      if (msg.user) {
+        const userHandle = await UserUtils.getSlackHandle(this.app, msg.user);
+        if (userHandle) {
+          userDisplay = userHandle;
+        }
+      } else if (msg.bot_id) {
+        userDisplay = `Bot (${msg.bot_id})`;
+      }
+
+      let messageText = this.getCombinedText(
+        msg.text,
+        msg.blocks,
+        msg.attachments,
+      );
+
+      if (msg.files && msg.files.length > 0) {
+        const fileNames = msg.files
+          .map((f: any) => f.name || "unknown file")
+          .join(", ");
+        messageText = messageText
+          ? `${messageText} [Files: ${fileNames}]`
+          : `[Files: ${fileNames}]`;
+      }
+
+      if (messageText.trim()) {
+        messageText = this.cleanSlackFormatting(messageText);
+        contextLines.push(`**${userDisplay}**: ${messageText}`);
+      }
+    }
+
+    if (contextLines.length === 0) {
+      return null;
+    }
+
+    return contextLines.join("\n\n");
+  }
+
+  private extractThreadUserText(
+    messages: any[],
+    event: MessageEvent | any,
+  ): string | undefined {
+    const texts: string[] = [];
+
+    for (const msg of messages) {
+      if (msg.ts === event.ts) continue;
+      if (!msg.user || msg.bot_id) continue;
+
+      const messageText = this.getCombinedText(
+        msg.text,
+        msg.blocks,
+        msg.attachments,
+      );
+      if (messageText.trim()) {
+        texts.push(this.cleanSlackFormatting(messageText));
+      }
+    }
+
+    if (texts.length === 0) {
+      return undefined;
+    }
+
+    return texts.join("\n");
   }
 
   /**
@@ -1313,36 +1380,6 @@ export class SlackHandler {
   }
 
   /**
-   * Split long text into multiple chunks that fit Slack's 3001 character limit
-   */
-  private splitMessageForSlack(
-    text: string,
-    maxLength: number = 2900,
-  ): string[] {
-    if (text.length <= maxLength) {
-      return [text];
-    }
-
-    const chunks: string[] = [];
-    let remainingText = text;
-
-    while (remainingText.length > 0) {
-      const chunk = remainingText.substring(0, maxLength);
-      chunks.push(chunk);
-      remainingText = remainingText.substring(maxLength);
-    }
-
-    // Add part indicators if we have multiple chunks
-    if (chunks.length > 1) {
-      return chunks.map(
-        (chunk, index) => `${chunk}\n\n_[Part ${index + 1}/${chunks.length}]_`,
-      );
-    }
-
-    return chunks;
-  }
-
-  /**
    * Split text into Slack-sized chunks, post them sequentially, and attach
    * voting buttons to the last chunk. Returns the final post result.
    */
@@ -1359,7 +1396,7 @@ export class SlackHandler {
     },
     poster: (opts: any) => Promise<any>,
   ): Promise<any> {
-    const chunks = this.splitMessageForSlack(text);
+    const chunks = splitMessageForSlack(text);
     let result: any;
     const priorChunkTimestamps: string[] = [];
 
@@ -1601,11 +1638,9 @@ export class SlackHandler {
 
     // Update final reaction (skip entirely for ephemeral messages)
     if (!willBeEphemeral && (await this.shouldShowReactions(event))) {
-      // Approvable actions own their reaction lifecycle end-to-end
+      // Custom actions own their reaction lifecycle end-to-end
       // (waiting-on-human → complete/error, driven by the registry).
-      const registryOwnsReaction = result.toolCallNames?.some((n: string) =>
-        n.startsWith("mcp__approvable-actions__"),
-      );
+      const registryOwnsReaction = result.confirmationDialogPosted === true;
       if (!registryOwnsReaction) {
         const isConditionalSkip =
           result.shouldNotRespond &&
@@ -1654,7 +1689,7 @@ export class SlackHandler {
     this.activeControllers.delete(sessionKey);
 
     // Schedule cleanup of reaction tracking. Kept long enough to outlive a
-    // pending approvable-action dialog: approve/cancel can land hours later and
+    // pending custom-action dialog: approve/cancel can land hours later and
     // update the original message's reaction through this same session, so it
     // must still be registered when they do.
     const keyToClean = reactionKey || sessionKey;
@@ -1858,7 +1893,7 @@ export class SlackHandler {
       const humanUserIds = new Set<string>();
 
       for (const m of messages) {
-        const isBot = !!m.bot_id || m.subtype === "bot_message";
+        const isBot = isBotAuthoredMessage(m);
         const userId: string | undefined = m.user;
         if (isBot || !userId || (botUserId && userId === botUserId)) continue;
 
@@ -1881,7 +1916,7 @@ export class SlackHandler {
   setupEventHandlers() {
     // Handle direct messages and conditional reply channels
     this.app.message(async ({ message, say }: { message: any; say: any }) => {
-      const isBotMessage = message.bot_id !== undefined;
+      const isBotMessage = isBotAuthoredMessage(message);
       if (message.subtype === undefined || isBotMessage) {
         const channelId: string = message.channel;
         const channelType = message.channel_type;
@@ -2174,7 +2209,7 @@ export class SlackHandler {
           const messageTextWithAcceptance = `${messageText}\n\n_(Accepted by <@${userId}>)_`;
 
           // Post the permanent message to the channel, splitting into chunks if needed
-          const fullMessageChunks = this.splitMessageForSlack(
+          const fullMessageChunks = splitMessageForSlack(
             messageTextWithAcceptance,
           );
 
@@ -2470,14 +2505,15 @@ export class SlackHandler {
 
     try {
       const botUserId = await this.getBotUserId();
-      const botMentionPattern = `<@${botUserId}>`;
-      if (
-        botUserId &&
-        typeof text === "string" &&
-        text.includes(botMentionPattern)
-      ) {
-        explicitMention = true;
-        text = text.split(botMentionPattern).join("").trim();
+      if (botUserId && typeof text === "string") {
+        // Match both <@ID> and the legacy <@ID|label> form — Slackbot
+        // reminders and some older integrations embed mentions with a label.
+        const botMentionPattern = new RegExp(`<@${botUserId}(\\|[^>]*)?>`, "g");
+        const stripped = text.replace(botMentionPattern, "");
+        if (stripped !== text) {
+          explicitMention = true;
+          text = stripped.trim();
+        }
       }
     } catch (_) {
       // Fail open: leave explicitMention as false and text unchanged

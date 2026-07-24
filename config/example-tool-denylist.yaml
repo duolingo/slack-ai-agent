@@ -2,7 +2,7 @@
 # Copy this file to tool-denylist.yaml and customize.
 #
 # Write-oriented GitHub MCP tools are blocked because the bot is read-only;
-# PR creation/modification should go through approvable actions instead.
+# PR creation/modification should go through custom actions instead.
 # git clone / git checkout are blocked to prevent the agent from cloning repos.
 
 disallowed_tools:

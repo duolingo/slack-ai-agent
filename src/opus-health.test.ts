@@ -13,13 +13,13 @@ describe("detectModelFallback", () => {
           subtype: "model_fallback",
           trigger: "overloaded",
           original_model: "claude-opus-4-8",
-          fallback_model: "claude-sonnet-4-6",
+          fallback_model: "claude-sonnet-5",
         }),
       ),
     ).toMatchObject({
       trigger: "overloaded",
       originalModel: "claude-opus-4-8",
-      fallbackModel: "claude-sonnet-4-6",
+      fallbackModel: "claude-sonnet-5",
     });
   });
 
@@ -44,7 +44,7 @@ describe("OpusHealthMonitor", () => {
     subtype: "model_fallback",
     trigger: "overloaded",
     original_model: "claude-opus-4-8",
-    fallback_model: "claude-sonnet-4-6",
+    fallback_model: "claude-sonnet-5",
   });
 
   it("alerts with models/trigger in the message and the raw payload in the thread", () => {
@@ -56,7 +56,7 @@ describe("OpusHealthMonitor", () => {
     expect(notify).toHaveBeenCalledTimes(1);
     const [text, threadDetail] = notify.mock.calls[0];
     expect(text).toContain("claude-opus-4-8");
-    expect(text).toContain("claude-sonnet-4-6");
+    expect(text).toContain("claude-sonnet-5");
     expect(text).toContain("overloaded");
     expect(text).not.toContain("```"); // raw payload is not in the main message
     expect(threadDetail).toContain("model_fallback"); // raw payload goes to the thread

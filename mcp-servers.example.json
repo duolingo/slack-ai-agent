@@ -28,6 +28,14 @@
       "headers": {
         "Authorization": "Bearer your-api-key"
       }
+    },
+    "internal-api": {
+      "type": "http",
+      "url": "https://mcp.internal.example.com/mcp",
+      "headers": {
+        "X-Api-Version": "2024-01-01"
+      },
+      "headersHelper": "cat \"$HOME/.config/my-app/mcp-auth-headers.json\""
     }
   }
 }
