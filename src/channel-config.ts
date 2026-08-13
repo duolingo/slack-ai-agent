@@ -30,6 +30,23 @@ interface ConditionalReplyChannel {
   allowedWorkflowIds?: string[]; // If set, only respond to these workflow IDs (empty array = block all workflows)
 }
 
+/**
+ * Proactive "smart reply" configuration. When a channel is eligible, the bot
+ * considers replying to messages even without an @-mention or a conditional-reply
+ * match — but only after a cheap pre-filter and a final "help or stay silent"
+ * check (see SlackHandler.handleSmartReplyCandidate).
+ *
+ * Smart reply is opt-in: it is enabled only in channels matching an include
+ * pattern. An empty/absent include list disables it everywhere; use [".*"] to
+ * enable it in every non-conditional channel the bot is in.
+ */
+interface SmartReplyConfig {
+  /** Channels whose name matches one of these patterns are eligible. Empty or
+   *  absent disables smart reply everywhere; [".*"] enables it in every
+   *  non-conditional channel the bot is in. */
+  includeChannelNamePatterns?: string[];
+}
+
 interface ChannelConfig {
   /** Per-channel context + model/effort settings. First matching pattern wins. */
   channelSettings: ChannelSettings[];
@@ -37,6 +54,7 @@ interface ChannelConfig {
   ephemeralChannelConfig: Record<string, string[]>;
   dmNotificationConfig: Record<string, string[]>;
   fullContentLoggingAllowlist?: string[];
+  smartReply?: SmartReplyConfig;
 }
 
 export class ChannelConfigManager {
@@ -173,6 +191,57 @@ export class ChannelConfigManager {
     }
     const pattern = await this.findMatchingConditionalChannel(channelName);
     return pattern !== null;
+  }
+
+  /**
+   * Test a channel name against a list of regex patterns. Invalid patterns are
+   * logged and skipped (fail-closed for that individual pattern).
+   */
+  private matchesAnyPattern(
+    channelName: string,
+    patterns: string[] | undefined,
+  ): boolean {
+    if (!patterns || patterns.length === 0) return false;
+    return patterns.some(pattern => {
+      try {
+        return new RegExp(pattern).test(channelName);
+      } catch (error) {
+        this.logger.error("Invalid regex in smartReply config", {
+          pattern,
+          error,
+        });
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Whether a channel name matches the smart-reply include patterns.
+   * Does not check conditional-reply channels — callers that already excluded
+   * those should use isSmartReplyEligibleChannelName instead.
+   */
+  private matchesSmartReplyIncludePatterns(
+    channelName: string,
+    smartReply: SmartReplyConfig | undefined,
+  ): boolean {
+    const include = smartReply?.includeChannelNamePatterns;
+    if (!include || include.length === 0) return false;
+    return this.matchesAnyPattern(channelName, include);
+  }
+
+  /**
+   * Fast eligibility check when the channel name is already known and the
+   * message is not in a conditional-reply channel. Use this in app.message
+   * routing to avoid re-fetching the channel name or logging/classifying
+   * ineligible channels.
+   */
+  async isSmartReplyEligibleChannelName(
+    channelName: string | undefined,
+    channelType: SlackChannelType,
+  ): Promise<boolean> {
+    if (this.isDirectMessage(channelType) || !channelName) return false;
+    const smartReply = (await this.loadConfig()).smartReply;
+    return this.matchesSmartReplyIncludePatterns(channelName, smartReply);
   }
 
   /**
@@ -387,8 +456,17 @@ export class ChannelConfigManager {
     channelType: SlackChannelType | undefined,
     explicitMention?: boolean,
     messageText?: string,
+    smartReply?: boolean,
   ): Promise<string> {
     const base = await this.getGeneralContext();
+
+    // Smart-reply turns get the strongest "help or stay silent" contract,
+    // regardless of whether the message is phrased as a question — the bot was
+    // not addressed, so it must earn its reply by genuinely helping.
+    if (smartReply) {
+      return `${base}\n\n**SMART REPLY MODE**: You were NOT explicitly mentioned in this channel. Reply ONLY if you can genuinely help — either directly answer a question you're confident about, or take/propose a concrete action with your available tools (e.g. open a PR, file a Jira ticket, look something up). If you cannot help, the message isn't seeking assistance, or it's directed at a specific person, respond with EXACTLY "DO_NOT_RESPOND" and nothing else. Do NOT post "I can't help", do NOT ask clarifying questions just to engage, and do NOT reply to social chatter.`;
+    }
+
     // Skip DO_NOT_RESPOND logic if: DM, explicit mention, or message has a question mark
     if (
       this.isDirectMessage(channelType) ||

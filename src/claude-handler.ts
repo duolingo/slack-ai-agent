@@ -22,6 +22,8 @@ const ALLOWED_ENV_VARS = new Set([
   "PATH",
   "HOME",
   "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
   // AWS CLI auth for local testing (duo sso session creds).
   // In prod, credentials come from the EC2 instance profile via IMDS.
   "AWS_ACCESS_KEY_ID",
@@ -34,15 +36,37 @@ const ALLOWED_ENV_VARS = new Set([
   // points to a service account key file.
   "CLOUDSDK_CONFIG",
   "GOOGLE_APPLICATION_CREDENTIALS",
-  // Per-call MCP tool timeout (ms). Defaults to 60s, which is too short for
-  // synchronous data-ai analyses; raise it via the environment.
-  "MCP_TOOL_TIMEOUT",
 ]);
+
+// Env for the Claude subprocess, applied over the allowlisted host vars.
+// buildSanitizedEnv() replaces the subprocess environment wholesale, so
+// these values can't be set via host env vars — change them here.
+// See https://code.claude.com/docs/en/env-vars.
+const CLAUDE_ENV = {
+  // The SDK defaults (200 per session, 3-deep nesting) left the bot open to
+  // runaway fan-out — a single session once launched 77 subagents and 13k+ turns.
+  CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "20",
+  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "2",
+  // Auto-memory persists conversation content — including from private DMs —
+  // to a memory directory that every session then reads back.
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+  // Sessions get MCP servers only from mcp-servers.json, which is vetted and
+  // pre-resolved by scripts/resolve-mcp-config.sh — never from a claude.ai
+  // account the bot happens to be authenticated as.
+  ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+  // Per-call MCP tool timeout (ms). The SDK's default is 60s, too short for
+  // synchronous data-ai analyses, which routinely run for minutes.
+  MCP_TOOL_TIMEOUT: "600000",
+  // Token cap on a single MCP tool result. The SDK's default truncates large
+  // BigQuery and Grafana payloads. Raising it costs context: a handful of
+  // full-size results is a real share of the per-query maxBudgetUsd ceiling.
+  MAX_MCP_OUTPUT_TOKENS: "60000",
+} as const;
 
 /**
  * Build a sanitized env for the Claude subprocess.
  *
- * Only PATH, HOME, and ANTHROPIC_API_KEY are passed. MCP server tokens
+ * Only PATH, HOME, and Anthropic auth credentials are passed. MCP server tokens
  * are no longer needed in the subprocess env because mcp-servers.json is
  * pre-resolved with literal values by scripts/resolve-mcp-config.sh.
  */
@@ -53,13 +77,16 @@ export const buildSanitizedEnv = (): Record<string, string | undefined> => {
       sanitized[key] = process.env[key];
     }
   }
+  // Applied last so a misconfigured runner can't bypass the invariants.
+  Object.assign(sanitized, CLAUDE_ENV);
   return sanitized;
 };
 
 /**
  * Determine whether custom actions should be injected for a given Slack context.
  * Actions are appropriate in DMs, explicit @-mentions, non-ephemeral conditional
- * reply channels, or workflow-triggered messages.
+ * reply channels, workflow-triggered messages, or proactive smart-reply turns
+ * (so the bot can propose concrete actions like opening a PR without a mention).
  */
 export function shouldInjectActions(
   ctx: Pick<
@@ -68,13 +95,15 @@ export function shouldInjectActions(
     | "explicitMention"
     | "workflowId"
     | "isNonEphemeralConditionalChannel"
+    | "smartReply"
   >,
 ): boolean {
   return (
     ctx.channelType === "im" ||
     !!ctx.explicitMention ||
     !!ctx.workflowId ||
-    !!ctx.isNonEphemeralConditionalChannel
+    !!ctx.isNonEphemeralConditionalChannel ||
+    !!ctx.smartReply
   );
 }
 
@@ -169,7 +198,6 @@ export class ClaudeHandler {
     prompt: string,
     session?: ConversationSession,
     abortController?: AbortController,
-    workingDirectory?: string,
     slackContext?: SlackContext,
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
@@ -185,7 +213,6 @@ export class ClaudeHandler {
           prompt,
           session,
           abortController,
-          workingDirectory,
           slackContext,
           onRetry,
           systemPrompt,
@@ -227,7 +254,6 @@ export class ClaudeHandler {
     prompt: string,
     session?: ConversationSession,
     abortController?: AbortController,
-    workingDirectory?: string,
     slackContext?: SlackContext,
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
@@ -243,7 +269,7 @@ export class ClaudeHandler {
     // permission checks because we want our `allowedTools` list (defined
     // below) to be fully enforced by the runtime.
     const primaryModel = requestMode?.model || config.anthropic.model;
-    const cwd = workingDirectory ?? config.baseDirectory;
+    const cwd = session?.workingDirectory ?? config.baseDirectory;
     const options: any = {
       outputFormat: "stream-json",
       // Configure the Claude model to use
@@ -258,8 +284,13 @@ export class ClaudeHandler {
       env: buildSanitizedEnv(),
       // Enable skill discovery from .claude/skills/ in the thread workspace
       settingSources: ["project", "user"],
-      // Maximum number of agentic turns before stopping
-      maxTurns: 120,
+      // Maximum number of agentic turns before stopping. A Data AI job polled
+      // every 5s for 25 minutes is ~300 turns on its own.
+      maxTurns: 400,
+      // Per-query spend ceiling (USD). The estimate accumulates across the
+      // top-level loop and all subagent API calls, and the query stops with
+      // an error_max_budget_usd result when it's hit.
+      maxBudgetUsd: 25,
       // Sandbox Bash commands so they cannot read the repo dir (which
       // contains mcp-servers.json with resolved secrets) or other
       // sensitive paths under $HOME. Read/Edit/Write tools are NOT
@@ -357,7 +388,7 @@ export class ClaudeHandler {
           workflowId: slackContext.workflowId,
           botId: slackContext.botId,
           reactionKey: slackContext.reactionKey,
-          workingDirectory: slackContext.workingDirectory,
+          workingDirectory: session?.workingDirectory,
         };
 
         const injectAllActions = shouldInjectActions(slackContext);
@@ -423,6 +454,14 @@ export class ClaudeHandler {
       ...loadSubagentDefinitions(
         allowedTools.length > 0 ? allowedTools : undefined,
       ),
+      // The SDK's built-in general-purpose agent is what the model spawns
+      // automatically for ad-hoc delegation, and it has no turn limit by
+      // default — a runaway general-purpose subagent can loop indefinitely.
+      // Override it with a cap so its own loop is bounded. Config-defined
+      // subagents (config/subagents/*.yaml) are left untouched.
+      "general-purpose": {
+        maxTurns: 100,
+      },
     };
 
     if (session?.sessionId) {
@@ -446,6 +485,12 @@ export class ClaudeHandler {
       });
     }, onRetry);
 
+    // Once the SDK yields a terminal limit result (budget/turns), the run is
+    // over — we want to deliver whatever the agent produced so far, not retry.
+    // The SDK raises after yielding that result; we swallow that raise so the
+    // stream ends cleanly and the caller (message-processor) can reply with
+    // the partial content plus the limit note from processResultMessage.
+    let hitTerminalLimit = false;
     try {
       for await (const message of generator) {
         // Watch for capacity signals so ops is alerted when Opus is falling
@@ -459,9 +504,27 @@ export class ClaudeHandler {
             session.sessionId = message.session_id;
           }
         }
+        if (
+          message.type === "result" &&
+          (message.subtype === "error_max_budget_usd" ||
+            message.subtype === "error_max_turns")
+        ) {
+          hitTerminalLimit = true;
+          this.logger.warn("Query hit terminal limit", {
+            subtype: message.subtype,
+            errors: (message as any).errors,
+            sessionId: session?.sessionId,
+          });
+        }
         yield message;
       }
     } catch (error) {
+      // The SDK raises after yielding the terminal limit result. We've already
+      // delivered it to the caller, so treat this as a clean end rather than a
+      // retryable failure — otherwise the user gets a generic error instead of
+      // the partial response + limit note.
+      if (hitTerminalLimit) return;
+
       // Log the streaming error with more details
       const errorMessage =
         error instanceof Error ? error.message : String(error);

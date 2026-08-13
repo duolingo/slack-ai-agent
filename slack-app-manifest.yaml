@@ -16,6 +16,7 @@ oauth_config:
     bot:
       - app_mentions:read
       - channels:history
+      - channels:read
       - chat:write
       - chat:write.public
       - files:read
@@ -32,6 +33,7 @@ settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - message.channels
       - message.groups
       - message.im
       - member_joined_channel

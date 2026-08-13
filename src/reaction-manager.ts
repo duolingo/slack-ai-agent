@@ -117,6 +117,24 @@ export class ReactionManager {
     }
   }
 
+  /** Remove whatever reaction is currently shown, leaving the message bare. */
+  async clearReaction(sessionKey: string): Promise<void> {
+    const originalMessage = this.originalMessages.get(sessionKey);
+    const currentEmoji = this.currentReactions.get(sessionKey);
+    if (!originalMessage || !currentEmoji) return;
+
+    try {
+      await this.app.client.reactions.remove({
+        channel: originalMessage.channel,
+        timestamp: originalMessage.ts,
+        name: currentEmoji,
+      });
+      this.currentReactions.delete(sessionKey);
+    } catch (error) {
+      this.logger.warn("Failed to clear message reaction", error);
+    }
+  }
+
   cleanupSession(sessionKey: string): void {
     this.originalMessages.delete(sessionKey);
     this.currentReactions.delete(sessionKey);

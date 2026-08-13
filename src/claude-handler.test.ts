@@ -9,7 +9,7 @@ jest.mock("./config", () => ({
       appToken: "xapp-test",
       signingSecret: "test-secret",
     },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-5" },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/slack-ai-agent",
     persistDir: "/tmp/test-persist",
@@ -319,6 +319,10 @@ describe("shouldInjectActions", () => {
     ).toBe(true);
   });
 
+  it("returns true for proactive smart-reply turns", () => {
+    expect(shouldInjectActions({ ...base, smartReply: true })).toBe(true);
+  });
+
   it("returns false for regular channel messages", () => {
     expect(shouldInjectActions(base)).toBe(false);
   });
@@ -362,7 +366,13 @@ describe("buildSanitizedEnv", () => {
       "AWS_REGION",
       "AWS_SECRET_ACCESS_KEY",
       "AWS_SESSION_TOKEN",
+      "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+      "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
+      "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+      "ENABLE_CLAUDEAI_MCP_SERVERS",
       "HOME",
+      "MAX_MCP_OUTPUT_TOKENS",
+      "MCP_TOOL_TIMEOUT",
       "PATH",
     ]);
   });
@@ -385,9 +395,36 @@ describe("buildSanitizedEnv", () => {
     expect(env.AWS_ACCESS_KEY_ID).toBe("AKIA-test");
   });
 
-  it("passes MCP_TOOL_TIMEOUT through when set", () => {
+  it("passes ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL through when set", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "auth-token-test";
+    process.env.ANTHROPIC_BASE_URL = "https://proxy.example.com";
+    const env = buildSanitizedEnv();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("auth-token-test");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://proxy.example.com");
+  });
+
+  it("always sets MCP limits", () => {
     process.env.MCP_TOOL_TIMEOUT = "180000";
-    expect(buildSanitizedEnv().MCP_TOOL_TIMEOUT).toBe("180000");
+    process.env.MAX_MCP_OUTPUT_TOKENS = "10000";
+    const env = buildSanitizedEnv();
+    expect(env.MCP_TOOL_TIMEOUT).toBe("600000");
+    expect(env.MAX_MCP_OUTPUT_TOKENS).toBe("60000");
+  });
+
+  it("always enforces subagent fan-out caps", () => {
+    const env = buildSanitizedEnv();
+    expect(env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("20");
+    expect(env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("2");
+  });
+
+  it("always disables auto-memory", () => {
+    process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "0";
+    expect(buildSanitizedEnv().CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("1");
+  });
+
+  it("always disables claude.ai-hosted MCP servers", () => {
+    process.env.ENABLE_CLAUDEAI_MCP_SERVERS = "true";
+    expect(buildSanitizedEnv().ENABLE_CLAUDEAI_MCP_SERVERS).toBe("false");
   });
 });
 

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "engines": {
-    "node": ">=20.6.0"
+    "node": "^20.6.0 || >=22"
   },
   "scripts": {
     "start": "tsx src/index.ts",
@@ -19,32 +19,35 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^25.9.1",
+    "@types/node": "^25.9.5",
     "jest": "^30.4.2",
-    "ts-jest": "^29.4.11",
-    "tsx": "^4.22.3",
+    "ts-jest": "^29.4.12",
+    "tsx": "^4.23.1",
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.215",
-    "@anthropic-ai/sdk": "^0.112.3",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
+    "@anthropic-ai/sdk": "^0.112.5",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/auto-instrumentations-node": "^0.78.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.220.0",
-    "@opentelemetry/resources": "^2.9.0",
-    "@opentelemetry/sdk-node": "^0.220.0",
-    "@opentelemetry/semantic-conventions": "^1.41.1",
-    "@slack/bolt": "^4.7.2",
+    "@opentelemetry/auto-instrumentations-node": "^0.79.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "@slack/bolt": "^4.7.3",
     "@types/node-fetch": "^2.6.13",
     "axios": "^1.13.6",
     "dotenv": "^17.4.2",
     "js-yaml": "^4.1.1",
-    "jsonrepair": "^3.14.0",
+    "jsonrepair": "^3.15.0",
     "node-fetch": "^3.3.2",
     "zod": "^4.4.3"
   },
   "overrides": {
-    "fast-xml-parser": "^5.3.4"
+    "brace-expansion": "^5.0.8",
+    "fast-xml-parser": "^5.3.4",
+    "minimatch": "^10.2.2",
+    "test-exclude": "^7.0.2"
   }
 }

@@ -14,7 +14,7 @@ jest.mock("./config", () => ({
       appToken: "xapp-test",
       signingSecret: "test-secret",
     },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-5" },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
     persistDir: "/tmp/test-persist",
@@ -61,6 +61,7 @@ jest.mock("./file-handler", () => ({
 jest.mock("./tracking", () => ({
   trackMessageProcessed: jest.fn(),
   trackMessageFeedback: jest.fn(),
+  trackMessageClassification: jest.fn(),
   generateSlackMessageLink: jest.fn(
     (ch: string, ts: string) =>
       `https://test.slack.com/archives/${ch}/p${ts.replace(".", "")}`,
@@ -82,6 +83,7 @@ import { ChannelConfigManager } from "./channel-config";
 import { SlackHandler } from "./slack-handler";
 import { MessageEvent } from "./types";
 import { UserUtils } from "./user-utils";
+import { trackMessageProcessed } from "./tracking";
 
 // --- Test helpers ---
 
@@ -129,6 +131,7 @@ function createHandler(): TestHarness {
   const mockReactionManager = {
     registerMessage: jest.fn(),
     updateReaction: jest.fn().mockResolvedValue(undefined),
+    clearReaction: jest.fn().mockResolvedValue(undefined),
     cleanupSession: jest.fn(),
   } as any;
 
@@ -231,74 +234,45 @@ describe("SlackHandler", () => {
     });
   });
 
-  describe("createSafeButtonValue", () => {
-    const safe = (data: any) => priv(handler).createSafeButtonValue(data);
-
-    it("includes channel and keeps text fields that fit the budget", () => {
-      const result = JSON.parse(
-        safe({
-          channel: "C123",
-          root_ts: "1.1",
-          question: "x".repeat(1500),
-          answer: "y".repeat(1500),
-        }),
-      );
-      expect(result.channel).toBe("C123");
-      expect(result.root_ts).toBe("1.1");
-      expect(result.question.length).toBeLessThan(1500);
-      expect(result.question.endsWith("...")).toBe(true);
-      expect(result.answer.length).toBeLessThan(1500);
-      expect(result.answer.endsWith("...")).toBe(true);
-    });
-
-    it("truncates long fields so the serialized value fits Slack's 2000-char limit", () => {
-      const value = safe({
+  describe("createVotingButtonsBlock", () => {
+    it("stores metadata server-side and button value contains only a ref", () => {
+      const block = priv(handler).createVotingButtonsBlock({
         channel: "C123",
         root_ts: "1.1",
-        question: "x".repeat(3000),
-        answer: "y".repeat(3000),
+        question: "x".repeat(5000),
+        answer: "y".repeat(5000),
       });
-      expect(value.length).toBeLessThanOrEqual(2000);
-      const result = JSON.parse(value);
-      expect(result.question.endsWith("...")).toBe(true);
-      expect(result.answer.endsWith("...")).toBe(true);
+      const value = block.elements[0].value;
+      expect(value.length).toBeLessThan(100);
+      const parsed = JSON.parse(value);
+      expect(parsed.ref).toBeDefined();
+      expect(parsed.question).toBeUndefined();
     });
 
-    it("stays within the limit when text fields require JSON escaping", () => {
-      const line = '• "Streak Revival" lets learners revive a lost streak\n';
-      const value = safe({
-        channel: "C09KPE8EACW",
-        channel_type: "channel",
-        root_ts: "1781133411.091249",
-        question: line.repeat(18).slice(0, 960),
-        answer: line.repeat(18).slice(0, 960),
-      });
-      expect(value.length).toBeLessThanOrEqual(2000);
-      expect(JSON.parse(value).channel).toBe("C09KPE8EACW");
-    });
-
-    it("stays within the limit when all five text fields are present", () => {
-      const value = safe({
+    it("all four buttons share the same ref", () => {
+      const block = priv(handler).createVotingButtonsBlock({
         channel: "C123",
-        channel_type: "channel",
-        root_ts: "1.1",
-        thread_ts: "2.2",
-        original_root_ts: "3.3",
-        chunk_ts: ["4.4", "5.5"],
-        question: "q".repeat(2500),
-        answer: "a".repeat(2500),
-        message_text: "m".repeat(2500),
-        original_question: "oq".repeat(1250),
-        original_answer: "oa".repeat(1250),
+        question: "hello",
+        answer: "world",
       });
-      expect(value.length).toBeLessThanOrEqual(2000);
-      const result = JSON.parse(value);
-      expect(result.chunk_ts).toEqual(["4.4", "5.5"]);
+      const refs = block.elements.map((el: any) => JSON.parse(el.value).ref);
+      expect(new Set(refs).size).toBe(1);
     });
 
-    it("omits undefined optional fields", () => {
-      const result = JSON.parse(safe({ channel: "C123" }));
-      expect(result).toEqual({ channel: "C123" });
+    it("stored metadata is retrievable via parseVotePayload", () => {
+      const block = priv(handler).createVotingButtonsBlock({
+        channel: "C123",
+        root_ts: "1.1",
+        question: "the question",
+        answer: "the answer",
+        chunk_ts: ["2.2", "3.3"],
+      });
+      const parsed = priv(handler).parseVotePayload(block.elements[0]);
+      expect(parsed?.channel).toBe("C123");
+      expect(parsed?.root_ts).toBe("1.1");
+      expect(parsed?.question).toBe("the question");
+      expect(parsed?.answer).toBe("the answer");
+      expect(parsed?.chunk_ts).toEqual(["2.2", "3.3"]);
     });
   });
 
@@ -509,10 +483,17 @@ describe("SlackHandler", () => {
         root_ts: "1.1",
       });
     });
+
+    it("returns null when the ref is stale (metadata missing)", () => {
+      const result = parse({
+        value: JSON.stringify({ ref: "nonexistent-ref" }),
+      });
+      expect(result).toBeNull();
+    });
   });
 
-  describe("createVotingButtonsBlock", () => {
-    it("includes channel_type in button payload", () => {
+  describe("createVotingButtonsBlock (channel_type)", () => {
+    it("preserves channel_type through ref lookup", () => {
       const block = priv(handler).createVotingButtonsBlock({
         channel: "D1",
         channel_type: "im",
@@ -520,8 +501,8 @@ describe("SlackHandler", () => {
         question: "q",
         answer: "a",
       });
-      const parsed = JSON.parse(block.elements[0].value);
-      expect(parsed.channel_type).toBe("im");
+      const parsed = priv(handler).parseVotePayload(block.elements[0]);
+      expect(parsed?.channel_type).toBe("im");
     });
   });
 
@@ -989,6 +970,42 @@ describe("SlackHandler", () => {
         "WF123",
       );
     });
+
+    it("does not duplicate text when blocks repeat the same content", async () => {
+      const event = makeEvent({
+        text: "seeing *two* deploys",
+        blocks: [
+          {
+            type: "rich_text",
+            elements: [
+              {
+                type: "rich_text_section",
+                elements: [
+                  { type: "text", text: "seeing " },
+                  { type: "text", text: "two", style: { bold: true } },
+                  { type: "text", text: " deploys" },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.text).toBe("seeing *two* deploys");
+    });
+
+    it("falls back to block text when text is empty", async () => {
+      const event = makeEvent({
+        text: "",
+        blocks: [
+          { type: "section", text: { type: "mrkdwn", text: "block only" } },
+        ],
+      });
+      const { event: normalized } =
+        await priv(handler).prepareEventForHandling(event);
+      expect(normalized.text).toBe("block only");
+    });
   });
 
   describe("sendResponse — final reaction", () => {
@@ -1047,6 +1064,600 @@ describe("SlackHandler", () => {
         expect.any(String),
         "white_check_mark", // REACTIONS.COMPLETE
       );
+    });
+
+    it("tracks message processed with agentCouldHelp false on DO_NOT_RESPOND", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: [],
+        shouldNotRespond: true,
+        doNotRespondOptOut: true,
+        costUsd: 0.015,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(trackMessageProcessed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentCouldHelp: false,
+          costUsd: 0.015,
+          slackAppAnswer: "",
+        }),
+      );
+    });
+
+    it("tracks action-only successes as helpful even when chat reply is suppressed", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: [],
+        shouldNotRespond: true,
+        confirmationDialogPosted: true,
+        costUsd: 0.02,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(trackMessageProcessed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentCouldHelp: true,
+          costUsd: 0.02,
+        }),
+      );
+    });
+
+    it("tracks isSmartReply true for proactive smart-reply turns", async () => {
+      const event = makeEvent({ smartReply: true });
+      const result = {
+        messages: ["helpful answer"],
+        shouldNotRespond: false,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(trackMessageProcessed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isSmartReply: true,
+        }),
+      );
+    });
+
+    it("tracks isSmartReply false for direct @-mention and DM turns", async () => {
+      const event = makeEvent({ explicitMention: true });
+      const result = {
+        messages: ["helpful answer"],
+        shouldNotRespond: false,
+      };
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+      expect(trackMessageProcessed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isSmartReply: false,
+        }),
+      );
+    });
+  });
+
+  describe("claimLatestSessionMessage (thread coalescing)", () => {
+    const claim = (sessionKey: string, ts: string) =>
+      priv(handler).claimLatestSessionMessage(sessionKey, ts);
+    const isLatest = (sessionKey: string, ts: string) =>
+      priv(handler).isLatestSessionMessage(sessionKey, ts);
+
+    it("claims the first message in a session", () => {
+      expect(claim("s1", "100.1")).toBe(true);
+      expect(isLatest("s1", "100.1")).toBe(true);
+    });
+
+    it("lets a newer message supersede and aborts the in-flight one", () => {
+      expect(claim("s1", "100.1")).toBe(true);
+
+      // The earlier message is mid-flight when the follow-up arrives.
+      const controller = new AbortController();
+      priv(handler).activeControllers.set("s1", controller);
+
+      expect(claim("s1", "100.2")).toBe(true);
+      expect(controller.signal.aborted).toBe(true);
+      expect(isLatest("s1", "100.2")).toBe(true);
+      expect(isLatest("s1", "100.1")).toBe(false);
+    });
+
+    it("drops an older, out-of-order delivery", () => {
+      expect(claim("s1", "100.2")).toBe(true);
+      expect(claim("s1", "100.1")).toBe(false);
+      expect(isLatest("s1", "100.2")).toBe(true);
+    });
+
+    it("keeps different sessions independent", () => {
+      expect(claim("s1", "100.1")).toBe(true);
+      expect(claim("s2", "100.1")).toBe(true);
+      expect(isLatest("s1", "100.1")).toBe(true);
+      expect(isLatest("s2", "100.1")).toBe(true);
+    });
+
+    it("releases the marker so a later message can be claimed again", () => {
+      expect(claim("s1", "100.1")).toBe(true);
+      priv(handler).releaseLatestSessionMessage("s1", "100.1");
+      expect(isLatest("s1", "100.1")).toBe(false);
+      expect(claim("s1", "200.1")).toBe(true);
+    });
+  });
+
+  describe("windowHasExplicitMention", () => {
+    const claimMention = (
+      sessionKey: string,
+      ts: string,
+      explicitMention: boolean,
+      text = "hi",
+    ) =>
+      priv(handler).claimLatestSessionMessage(
+        sessionKey,
+        ts,
+        text,
+        explicitMention,
+      );
+    const hasMention = (sessionKey: string) =>
+      priv(handler).windowHasExplicitMention(sessionKey);
+
+    it("returns false for a session with no coalescing window", () => {
+      expect(hasMention("s1")).toBe(false);
+    });
+
+    it("mirrors the message's own flag for a single-message window", () => {
+      expect(claimMention("s1", "100.1", false)).toBe(true);
+      expect(hasMention("s1")).toBe(false);
+
+      expect(claimMention("s2", "100.1", true)).toBe(true);
+      expect(hasMention("s2")).toBe(true);
+    });
+
+    it("returns false when no folded message mentioned the bot", () => {
+      claimMention("s1", "100.1", false);
+      claimMention("s1", "100.2", false);
+      expect(hasMention("s1")).toBe(false);
+    });
+
+    it("returns true when only an earlier folded message mentioned the bot", () => {
+      claimMention("s1", "100.1", true);
+      claimMention("s1", "100.2", false);
+      claimMention("s1", "100.3", false);
+      expect(hasMention("s1")).toBe(true);
+    });
+
+    it("returns true when only the latest message mentioned the bot", () => {
+      claimMention("s1", "100.1", false);
+      claimMention("s1", "100.2", true);
+      expect(hasMention("s1")).toBe(true);
+    });
+
+    it("does not leak a mention across sessions", () => {
+      claimMention("s1", "100.1", true);
+      claimMention("s2", "100.1", false);
+      expect(hasMention("s1")).toBe(true);
+      expect(hasMention("s2")).toBe(false);
+    });
+
+    it("forgets the mention once the window is released", () => {
+      claimMention("s1", "100.1", true);
+      claimMention("s1", "100.2", false);
+      priv(handler).releaseLatestSessionMessage("s1", "100.2");
+      expect(hasMention("s1")).toBe(false);
+
+      // A brand-new window after the release starts clean.
+      claimMention("s1", "200.1", false);
+      expect(hasMention("s1")).toBe(false);
+    });
+
+    it("keeps the mention when the same message is delivered twice", () => {
+      expect(claimMention("s1", "100.1", true)).toBe(true);
+      // Slack retries deliver the same ts again; it loses the claim but must
+      // not drop the mention already recorded for it.
+      expect(claimMention("s1", "100.1", false)).toBe(false);
+      expect(hasMention("s1")).toBe(true);
+    });
+  });
+
+  describe("handleMessage — distinct messages each answered", () => {
+    let processClaudeStream: jest.Mock;
+
+    beforeEach(() => {
+      // The 12h reaction-cleanup timer in cleanup() would otherwise leak.
+      jest.useFakeTimers();
+
+      (UserUtils.getUserRole as jest.Mock).mockResolvedValue("member");
+
+      t.channelConfig.shouldUseEphemeralMessaging = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.getEphemeralTargetUsers = jest.fn().mockResolvedValue([]);
+      t.channelConfig.getEphemeralTargetChannels = jest
+        .fn()
+        .mockResolvedValue([]);
+      t.channelConfig.isNonEphemeralConditionalChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.getGeneralContextForChannel = jest
+        .fn()
+        .mockResolvedValue("");
+      t.channelConfig.getContextSource = jest.fn().mockResolvedValue(null);
+      t.channelConfig.getChannelName = jest.fn().mockResolvedValue("general");
+      t.channelConfig.isDirectMessage = jest.fn().mockReturnValue(false);
+      t.channelConfig.getChannelModelOverride = jest
+        .fn()
+        .mockResolvedValue(undefined);
+
+      t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
+      t.claudeHandler.createSession = jest
+        .fn()
+        .mockReturnValue({ workingDirectory: "/tmp/work" });
+
+      processClaudeStream = jest.fn().mockResolvedValue({
+        messages: ["Here is your answer."],
+        shouldNotRespond: false,
+        toolCalls: [],
+        turnCount: 1,
+      });
+      priv(handler).messageProcessor.processClaudeStream = processClaudeStream;
+    });
+
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    it("runs the pipeline for each distinct message", async () => {
+      await handler.handleMessage(
+        makeEvent({ text: "q1", explicitMention: true, ts: "555.1" }),
+        jest.fn(),
+      );
+      await handler.handleMessage(
+        makeEvent({ text: "q2", explicitMention: true, ts: "555.2" }),
+        jest.fn(),
+      );
+
+      expect(processClaudeStream).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("handleMessage — coalescing thread follow-ups", () => {
+    let processClaudeStream: jest.Mock;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+
+      (UserUtils.getUserRole as jest.Mock).mockResolvedValue("member");
+
+      t.channelConfig.shouldUseEphemeralMessaging = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.getEphemeralTargetUsers = jest.fn().mockResolvedValue([]);
+      t.channelConfig.getEphemeralTargetChannels = jest
+        .fn()
+        .mockResolvedValue([]);
+      t.channelConfig.isNonEphemeralConditionalChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      t.channelConfig.getGeneralContextForChannel = jest
+        .fn()
+        .mockResolvedValue("");
+      t.channelConfig.getContextSource = jest.fn().mockResolvedValue(null);
+      t.channelConfig.getChannelName = jest.fn().mockResolvedValue("general");
+      t.channelConfig.isDirectMessage = jest.fn().mockReturnValue(false);
+      t.channelConfig.getChannelModelOverride = jest
+        .fn()
+        .mockResolvedValue(undefined);
+
+      t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
+      t.claudeHandler.createSession = jest
+        .fn()
+        .mockReturnValue({ workingDirectory: "/tmp/work" });
+
+      processClaudeStream = jest.fn();
+      priv(handler).messageProcessor.processClaudeStream = processClaudeStream;
+    });
+
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    it("posts one combined reply and drops the superseded message when a follow-up arrives mid-thinking", async () => {
+      let markStreamStarted: () => void;
+      const streamStarted = new Promise<void>(resolve => {
+        markStreamStarted = resolve;
+      });
+      let resolveFirstStream: (result: unknown) => void;
+      const firstStream = new Promise(resolve => {
+        resolveFirstStream = resolve;
+      });
+
+      // First message hangs "thinking" until we resolve it; the follow-up
+      // resolves immediately with the combined answer.
+      processClaudeStream
+        .mockImplementationOnce(() => {
+          markStreamStarted();
+          return firstStream;
+        })
+        .mockResolvedValue({
+          messages: ["Combined answer to both messages."],
+          shouldNotRespond: false,
+          toolCalls: [],
+          turnCount: 1,
+        });
+
+      const sayFirst = jest.fn();
+      const sayFollowUp = jest.fn();
+
+      const firstDelivery = handler.handleMessage(
+        makeEvent({ text: "first", explicitMention: true, ts: "600.1" }),
+        sayFirst,
+      );
+      // Wait until the first message is actually mid-thinking.
+      await streamStarted;
+
+      // A follow-up lands in the same thread while the bot is still thinking.
+      await handler.handleMessage(
+        makeEvent({
+          text: "second, more context",
+          explicitMention: true,
+          ts: "600.2",
+          thread_ts: "600.1",
+        }),
+        sayFollowUp,
+      );
+
+      // The first message's (now superseded) stream finally returns.
+      resolveFirstStream!({
+        messages: ["Answer to only the first message."],
+        shouldNotRespond: false,
+        toolCalls: [],
+        turnCount: 1,
+      });
+      await firstDelivery;
+
+      expect(sayFollowUp).toHaveBeenCalled();
+      expect(sayFirst).not.toHaveBeenCalled();
+
+      // The winning (follow-up) run's prompt folds both messages into one
+      // combined query rather than treating the first as background context.
+      const followUpPrompt = processClaudeStream.mock.calls[1][0] as string;
+      const userQuery = followUpPrompt.split("## User Query:\n")[1] ?? "";
+      expect(userQuery).toContain("first");
+      expect(userQuery).toContain("second, more context");
+    });
+
+    it("answers the coalesced burst on a fresh session instead of resuming the superseded turns", async () => {
+      // A prior exchange in this thread left a resumable session id.
+      t.claudeHandler.createSession = jest
+        .fn()
+        .mockReturnValue({ workingDirectory: "/tmp/work", sessionId: "prior" });
+
+      let markStreamStarted: () => void;
+      const streamStarted = new Promise<void>(resolve => {
+        markStreamStarted = resolve;
+      });
+      let resolveFirstStream: (result: unknown) => void;
+      const firstStream = new Promise(resolve => {
+        resolveFirstStream = resolve;
+      });
+
+      // Snapshot the session id each run actually used, since the runs share
+      // one mutable session object.
+      const sessionIdAtCall: (string | undefined)[] = [];
+      processClaudeStream
+        .mockImplementationOnce(
+          (_prompt: string, session: { sessionId?: string }) => {
+            sessionIdAtCall.push(session.sessionId);
+            markStreamStarted();
+            return firstStream;
+          },
+        )
+        .mockImplementation(
+          (_prompt: string, session: { sessionId?: string }) => {
+            sessionIdAtCall.push(session.sessionId);
+            return Promise.resolve({
+              messages: ["Combined answer."],
+              shouldNotRespond: false,
+              toolCalls: [],
+              turnCount: 1,
+            });
+          },
+        );
+
+      const firstDelivery = handler.handleMessage(
+        makeEvent({ text: "first", explicitMention: true, ts: "700.1" }),
+        jest.fn(),
+      );
+      await streamStarted;
+
+      await handler.handleMessage(
+        makeEvent({
+          text: "second",
+          explicitMention: true,
+          ts: "700.2",
+          thread_ts: "700.1",
+        }),
+        jest.fn(),
+      );
+
+      resolveFirstStream!({
+        messages: [],
+        shouldNotRespond: false,
+        toolCalls: [],
+        turnCount: 1,
+      });
+      await firstDelivery;
+
+      // The superseded first run still resumed the prior session; the winning
+      // coalesced run starts fresh so the model doesn't read the superseded
+      // turns as already-answered and reply to only the newest question.
+      expect(sessionIdAtCall[0]).toBe("prior");
+      expect(sessionIdAtCall[1]).toBeUndefined();
+    });
+
+    describe("in an ephemeral channel", () => {
+      beforeEach(() => {
+        t.channelConfig.shouldUseEphemeralMessaging = jest
+          .fn()
+          .mockResolvedValue(true);
+        t.channelConfig.getEphemeralTargetUsers = jest
+          .fn()
+          .mockResolvedValue(["U123"]);
+        t.channelConfig.shouldSendDM = jest.fn().mockResolvedValue(false);
+      });
+
+      it("posts the coalesced reply publicly when only the folded earlier message @-mentioned the bot", async () => {
+        let markStreamStarted: () => void;
+        const streamStarted = new Promise<void>(resolve => {
+          markStreamStarted = resolve;
+        });
+        let resolveFirstStream: (result: unknown) => void;
+        const firstStream = new Promise(resolve => {
+          resolveFirstStream = resolve;
+        });
+
+        processClaudeStream
+          .mockImplementationOnce(() => {
+            markStreamStarted();
+            return firstStream;
+          })
+          .mockResolvedValue({
+            messages: ["Combined answer to both messages."],
+            shouldNotRespond: false,
+            toolCalls: [],
+            turnCount: 1,
+          });
+
+        const sayFirst = jest.fn();
+        const sayFollowUp = jest.fn();
+
+        // The message that opened the burst tagged the bot.
+        const firstDelivery = handler.handleMessage(
+          makeEvent({
+            text: "<@UBOTID> first",
+            explicitMention: true,
+            ts: "800.1",
+          }),
+          sayFirst,
+        );
+        await streamStarted;
+
+        // The follow-up that wins the burst does not tag the bot on its own.
+        await handler.handleMessage(
+          makeEvent({
+            text: "second, more context",
+            explicitMention: false,
+            ts: "800.2",
+            thread_ts: "800.1",
+          }),
+          sayFollowUp,
+        );
+
+        resolveFirstStream!({
+          messages: ["Answer to only the first message."],
+          shouldNotRespond: false,
+          toolCalls: [],
+          turnCount: 1,
+        });
+        await firstDelivery;
+
+        // The burst answers a message that tagged the bot, so the single reply
+        // stays public in-thread instead of being routed ephemerally.
+        expect(t.app.client.chat.postEphemeral).not.toHaveBeenCalled();
+        expect(sayFollowUp).toHaveBeenCalled();
+        expect(sayFirst).not.toHaveBeenCalled();
+        expect(sayFollowUp.mock.calls[0][0]).toMatchObject({
+          thread_ts: "800.1",
+        });
+
+        // The superseded mentioned message was answered by the combined reply,
+        // so it gets no "skipped" reaction — any in-progress reaction is
+        // cleared instead, leaving it bare.
+        expect(t.reactionManager.updateReaction).not.toHaveBeenCalledWith(
+          "U123:C456:800.1:800.1",
+          "see_no_evil",
+        );
+        expect(t.reactionManager.clearReaction).toHaveBeenCalledWith(
+          "U123:C456:800.1:800.1",
+        );
+      });
+
+      it("treats the winning run as mentioned for processing, not just delivery", async () => {
+        let markStreamStarted: () => void;
+        const streamStarted = new Promise<void>(resolve => {
+          markStreamStarted = resolve;
+        });
+        let resolveFirstStream: (result: unknown) => void;
+        const firstStream = new Promise(resolve => {
+          resolveFirstStream = resolve;
+        });
+
+        processClaudeStream
+          .mockImplementationOnce(() => {
+            markStreamStarted();
+            return firstStream;
+          })
+          .mockResolvedValue({
+            messages: ["Combined answer."],
+            shouldNotRespond: false,
+            toolCalls: [],
+            turnCount: 1,
+          });
+
+        const firstDelivery = handler.handleMessage(
+          makeEvent({
+            text: "<@UBOTID> first",
+            explicitMention: true,
+            ts: "810.1",
+          }),
+          jest.fn(),
+        );
+        await streamStarted;
+
+        await handler.handleMessage(
+          makeEvent({
+            text: "second, more context",
+            explicitMention: false,
+            ts: "810.2",
+            thread_ts: "810.1",
+          }),
+          jest.fn(),
+        );
+
+        resolveFirstStream!({
+          messages: ["Answer to only the first message."],
+          shouldNotRespond: false,
+          toolCalls: [],
+          turnCount: 1,
+        });
+        await firstDelivery;
+
+        // The winning run's own message didn't tag the bot, but the burst did —
+        // the model context and mode resolution must see the effective mention.
+        const slackContext = processClaudeStream.mock.calls[1][3];
+        expect(slackContext.explicitMention).toBe(true);
+        expect(slackContext.reactionKey).toBeDefined();
+      });
+
+      it("still routes ephemerally when the lone message in the window has no @-mention", async () => {
+        processClaudeStream.mockResolvedValue({
+          messages: ["Answer."],
+          shouldNotRespond: false,
+          toolCalls: [],
+          turnCount: 1,
+        });
+
+        const say = jest.fn();
+        await handler.handleMessage(
+          makeEvent({
+            text: "just asking",
+            explicitMention: false,
+            ts: "900.1",
+          }),
+          say,
+        );
+
+        expect(t.app.client.chat.postEphemeral).toHaveBeenCalled();
+        expect(say).not.toHaveBeenCalled();
+      });
     });
   });
 
