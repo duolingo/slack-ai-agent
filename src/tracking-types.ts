@@ -25,6 +25,26 @@ export interface MessageProcessedEvent {
   turnCount?: number;
   phaseTimings?: PhaseTimings;
   isOpusFastMode?: boolean;
+  /** true when the bot proactively replied without an @-mention (smart-reply path) */
+  isSmartReply?: boolean;
+  /** false when the agent explicitly returned DO_NOT_RESPOND */
+  agentCouldHelp?: boolean;
+}
+
+export interface MessageClassificationEvent {
+  slackUserId?: string;
+  slackUsername: string;
+  slackHandle?: string | null;
+  slackChannel: string;
+  slackChannelType: SlackChannelType;
+  slackChannelName?: string;
+  slackThreadTs?: string;
+  slackMessageLink: string;
+  slackAppQuestion: string;
+  latencyMs: number;
+  costUsd?: number;
+  /** true = classifier YES, false = classifier NO */
+  couldHelp: boolean;
 }
 
 export interface FeedbackEvent {
@@ -47,6 +67,7 @@ export interface FeedbackEvent {
 /** Interface for handling tracking events. Implement this to customize where events are sent. */
 export interface EventHandler {
   onMessageProcessed(event: MessageProcessedEvent): Promise<void>;
+  onMessageClassification(event: MessageClassificationEvent): Promise<void>;
   onFeedback(event: FeedbackEvent): Promise<void>;
 }
 

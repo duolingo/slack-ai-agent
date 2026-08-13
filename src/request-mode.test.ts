@@ -115,8 +115,8 @@ describe("resolveMode", () => {
     expect(resolveMode("think fast", { effort: "max" })).toEqual({
       model: HAIKU_MODEL,
     });
-    expect(resolveMode("think hard", { model: "claude-opus-4-8" })).toEqual({
-      model: "claude-opus-4-8",
+    expect(resolveMode("think hard", { model: "claude-opus-5" })).toEqual({
+      model: "claude-opus-5",
       effort: "max",
     });
   });
@@ -150,8 +150,8 @@ describe("resolveMode", () => {
 
   it("keeps fast mode when the channel pins an Opus model", () => {
     expect(
-      resolveMode("hi", { model: "claude-opus-4-8", fastModePattern: ".*" }),
-    ).toEqual({ model: "claude-opus-4-8", fast: true });
+      resolveMode("hi", { model: "claude-opus-5", fastModePattern: ".*" }),
+    ).toEqual({ model: "claude-opus-5", fast: true });
   });
 
   it("drops fast mode when the channel pins a non-Opus model", () => {

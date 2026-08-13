@@ -147,8 +147,21 @@ export const config = {
     signingSecret: getRequiredEnv("CC_SLACK_SIGNING_SECRET"),
   },
   anthropic: {
-    apiKey: getRequiredEnv("ANTHROPIC_API_KEY"),
-    model: OPUS_MODEL, // Claude 4.8 Opus - most capable model
+    apiKey: (() => {
+      if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+      if (process.env.ANTHROPIC_AUTH_TOKEN) {
+        if (!process.env.ANTHROPIC_BASE_URL) {
+          throw new Error(
+            "ANTHROPIC_BASE_URL is required when using ANTHROPIC_AUTH_TOKEN",
+          );
+        }
+        return process.env.ANTHROPIC_AUTH_TOKEN;
+      }
+      throw new Error(
+        "Missing required environment variable: set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL",
+      );
+    })(),
+    model: OPUS_MODEL, // Claude Opus 5 - most capable model
   },
   slackWorkspaceUrl: getRequiredEnv("SLACK_WORKSPACE_URL"),
   // Optional Slack channel for operational alerts (e.g. model fallback). When

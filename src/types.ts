@@ -37,6 +37,11 @@ export interface MessageEvent {
   explicitMention?: boolean;
   replyBroadcast?: boolean;
   channel_type: SlackChannelType;
+  /** True when this is a proactive "smart reply" turn: the bot was not
+   *  @-mentioned and the channel is not a conditional-reply channel, but the
+   *  message passed the smart-reply pre-filter so Claude is given a chance to
+   *  help or stay silent. */
+  smartReply?: boolean;
 }
 
 export interface SlackContext {
@@ -56,12 +61,14 @@ export interface SlackContext {
   /** True when the channel is a non-ephemeral conditional reply channel
    *  (the bot is the primary responder and messages are directed at it). */
   isNonEphemeralConditionalChannel?: boolean;
+  /** True when this is a proactive smart-reply turn (no @-mention, non-conditional
+   *  channel). Enables the "help or stay silent" (DO_NOT_RESPOND) contract and
+   *  makes custom actions available so the bot can propose concrete actions. */
+  smartReply?: boolean;
   /** SlackHandler reaction key for this message. Only set when bot lifecycle
    *  reactions are enabled (non-ephemeral contexts), so custom actions can
    *  update the reaction through the session path while the turn is live. */
   reactionKey?: string;
-  /** Per-thread agent workspace; used for cwd and sandbox writes. */
-  workingDirectory?: string;
 }
 
 export interface TokenUsage {

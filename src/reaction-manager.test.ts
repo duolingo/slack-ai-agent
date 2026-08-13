@@ -11,7 +11,7 @@ jest.mock("./config", () => ({
       appToken: "xapp-test",
       signingSecret: "test-secret",
     },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-5" },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
     persistDir: "/tmp/test-persist",

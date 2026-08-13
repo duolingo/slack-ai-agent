@@ -18,6 +18,8 @@ import {
 export interface MessageProcessorResult {
   messages: string[];
   shouldNotRespond: boolean;
+  /** True when the agent explicitly returned DO_NOT_RESPOND (not action-only suppression). */
+  doNotRespondOptOut?: boolean;
   debugLogs?: string[];
   toolCalls?: string[];
   toolCallNames?: string[];
@@ -25,7 +27,8 @@ export interface MessageProcessorResult {
   confirmationDialogPosted?: boolean;
   tokenUsage?: TokenUsage;
   turnCount?: number;
-  /** Total Claude API cost (USD) for this message, from the SDK result message. */
+  /** Agent Claude API cost (USD) from the SDK result message. Excludes smart-reply
+   *  classifier spend, which is tracked separately via slack_ai_bot_message_classification. */
   costUsd?: number;
   phaseTimings?: PhaseTimings;
 }
@@ -76,11 +79,31 @@ export class MessageProcessor {
   }
 
   /**
+   * DO_NOT_RESPOND is only honored where the bot is speaking proactively and
+   * should be able to opt out of replying: conditional-reply channels and
+   * smart-reply turns. In directly-addressed contexts (DMs, @-mentions) the
+   * literal string would otherwise be posted, so we ignore it there.
+   */
+  private async shouldHonorDoNotRespond(
+    slackContext: SlackContext,
+  ): Promise<boolean> {
+    if (slackContext.smartReply) return true;
+    return this.channelConfig.isConditionalReplyChannel(
+      slackContext.channel,
+      slackContext.channelType,
+    );
+  }
+
+  /**
    * Check if reactions should be shown for this message (no reactions for ephemeral messages)
    */
   private async shouldShowReactions(
     slackContext: SlackContext,
   ): Promise<boolean> {
+    // Smart-reply turns stay invisible until (and unless) the bot actually
+    // posts, so it never leaves a stray 👀/✅ on a message it chose to skip.
+    if (slackContext.smartReply) return false;
+
     const isEphemeralChannel =
       await this.channelConfig.shouldUseEphemeralMessaging(
         slackContext.channel,
@@ -100,7 +123,6 @@ export class MessageProcessor {
     prompt: string,
     session: ConversationSession,
     abortController: AbortController,
-    workingDirectory?: string,
     slackContext?: SlackContext,
     sessionKey?: string,
     systemPrompt?: string,
@@ -113,6 +135,7 @@ export class MessageProcessor {
     const toolCallNames: string[] = [];
     let confirmationDialogPosted = false;
     let shouldNotRespond = false;
+    let doNotRespondOptOut = false;
     let tokenUsage: TokenUsage | undefined;
     let costUsd: number | undefined;
     let turnCount = 0;
@@ -146,7 +169,6 @@ export class MessageProcessor {
       prompt,
       session,
       abortController,
-      workingDirectory,
       slackContext,
       async () => {},
       systemPrompt,
@@ -182,15 +204,12 @@ export class MessageProcessor {
         const content = this.extractTextContent(message);
         if (
           content &&
+          content.match(/DO_NOT_RESPOND/i) &&
           slackContext &&
-          (await this.channelConfig.isConditionalReplyChannel(
-            slackContext.channel,
-            slackContext.channelType,
-          ))
+          (await this.shouldHonorDoNotRespond(slackContext))
         ) {
-          if (content.match(/DO_NOT_RESPOND/i)) {
-            shouldNotRespond = true;
-          }
+          shouldNotRespond = true;
+          doNotRespondOptOut = true;
         }
       } else if (message.type === "user") {
         // Handle tool result messages (user messages with tool_result content)
@@ -228,15 +247,12 @@ export class MessageProcessor {
           (message as any).result || (message as any).message?.result;
         if (
           resultText &&
+          resultText.match(/DO_NOT_RESPOND/i) &&
           slackContext &&
-          (await this.channelConfig.isConditionalReplyChannel(
-            slackContext.channel,
-            slackContext.channelType,
-          ))
+          (await this.shouldHonorDoNotRespond(slackContext))
         ) {
-          if (resultText.match(/DO_NOT_RESPOND/i)) {
-            shouldNotRespond = true;
-          }
+          shouldNotRespond = true;
+          doNotRespondOptOut = true;
         }
       }
     }
@@ -267,6 +283,7 @@ export class MessageProcessor {
     return {
       messages: currentMessages,
       shouldNotRespond,
+      doNotRespondOptOut: doNotRespondOptOut || undefined,
       debugLogs: isDebugMode ? debugLogs : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolCallNames: toolCallNames.length > 0 ? toolCallNames : undefined,
@@ -386,6 +403,24 @@ export class MessageProcessor {
     if (isSuccessfulResult && resultText && currentMessages.length === 0) {
       // Only add result if we don't already have text content from assistant messages
       currentMessages.push(resultText);
+      return;
+    }
+
+    // Terminal limit results (budget/turns) carry no assistant text. Without a
+    // fallback message the bot sends nothing and the user is left wondering
+    // why it went silent. Surface a clear explanation instead.
+    if (currentMessages.length === 0) {
+      if (message.subtype === "error_max_budget_usd") {
+        currentMessages.push(
+          "I hit the per-request spending limit before finishing. " +
+            "Please try a narrower request or ask a human to raise the cap.",
+        );
+      } else if (message.subtype === "error_max_turns") {
+        currentMessages.push(
+          "I ran out of turns before finishing this task. " +
+            "Please try a narrower request or ask a human to raise the cap.",
+        );
+      }
     }
   }
 

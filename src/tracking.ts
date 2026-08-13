@@ -11,6 +11,7 @@ import { HttpEventHandler } from "./http-event-handler";
 import {
   EventHandler,
   MessageProcessedEvent,
+  MessageClassificationEvent,
   FeedbackEvent,
   generateMessageId,
   truncateText,
@@ -20,6 +21,7 @@ import {
 export {
   EventHandler,
   MessageProcessedEvent,
+  MessageClassificationEvent,
   FeedbackEvent,
   generateMessageId,
   truncateText,
@@ -124,6 +126,18 @@ export class ConsoleEventHandler implements EventHandler {
     );
   }
 
+  async onMessageClassification(
+    params: MessageClassificationEvent,
+  ): Promise<void> {
+    logger.info("Message classification:", {
+      link: params.slackMessageLink,
+      user: params.slackUsername,
+      couldHelp: params.couldHelp,
+      costUsd: params.costUsd,
+      ms: params.latencyMs,
+    });
+  }
+
   async onFeedback(params: FeedbackEvent): Promise<void> {
     logger.info(`Feedback ${params.upvoteStatus}:`, {
       link: params.slackMessageLink,
@@ -175,6 +189,13 @@ export const trackMessageProcessed = async (
   params: MessageProcessedEvent,
 ): Promise<void> => {
   await activeHandler.onMessageProcessed(params);
+};
+
+/** Track a slack_ai_bot_message_classification event */
+export const trackMessageClassification = async (
+  params: MessageClassificationEvent,
+): Promise<void> => {
+  await activeHandler.onMessageClassification(params);
 };
 
 /** Track a slack_ai_bot_message_feedback event */

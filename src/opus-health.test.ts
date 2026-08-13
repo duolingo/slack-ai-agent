@@ -12,13 +12,13 @@ describe("detectModelFallback", () => {
           type: "system",
           subtype: "model_fallback",
           trigger: "overloaded",
-          original_model: "claude-opus-4-8",
+          original_model: "claude-opus-5",
           fallback_model: "claude-sonnet-5",
         }),
       ),
     ).toMatchObject({
       trigger: "overloaded",
-      originalModel: "claude-opus-4-8",
+      originalModel: "claude-opus-5",
       fallbackModel: "claude-sonnet-5",
     });
   });
@@ -43,7 +43,7 @@ describe("OpusHealthMonitor", () => {
     type: "system",
     subtype: "model_fallback",
     trigger: "overloaded",
-    original_model: "claude-opus-4-8",
+    original_model: "claude-opus-5",
     fallback_model: "claude-sonnet-5",
   });
 
@@ -55,7 +55,7 @@ describe("OpusHealthMonitor", () => {
 
     expect(notify).toHaveBeenCalledTimes(1);
     const [text, threadDetail] = notify.mock.calls[0];
-    expect(text).toContain("claude-opus-4-8");
+    expect(text).toContain("claude-opus-5");
     expect(text).toContain("claude-sonnet-5");
     expect(text).toContain("overloaded");
     expect(text).not.toContain("```"); // raw payload is not in the main message

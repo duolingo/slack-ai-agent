@@ -10,8 +10,13 @@ import {
   MODE_TRIGGER_EMOJIS,
 } from "./reaction-manager";
 import { MessageProcessor } from "./message-processor";
+import { ButtonMetadataStore } from "./button-metadata";
 import { splitMessageForSlack } from "./message-splitter";
 import { resolveMode } from "./request-mode";
+import {
+  passesSmartReplyStructuralFilter,
+  classifySmartReplyCandidate,
+} from "./smart-reply-filter";
 import {
   MessageEvent,
   SlackChannelType,
@@ -22,6 +27,7 @@ import {
 import {
   trackMessageProcessed,
   trackMessageFeedback,
+  trackMessageClassification,
   generateSlackMessageLink,
   generateMessageId,
   isFullContentLoggingAllowed,
@@ -66,15 +72,30 @@ export class SlackHandler {
   private messageProcessor: MessageProcessor;
   private botUserId: string | null = null;
 
-  // Slack button value size limits
-  private static readonly SLACK_BUTTON_VALUE_MAX_SIZE = 2000;
-  private static readonly BUTTON_VALUE_BUFFER_SIZE = 250;
-  private static readonly CHUNK_PREFIX_BUFFER_SIZE = 20;
-  private static readonly MIN_CHUNK_SIZE = 50;
+  private buttonMetadata: ButtonMetadataStore;
 
   // Caching
   private contextCache: Map<string, { text: string; fetchedAt: number }> =
     new Map();
+
+  // Maps a conversation session (user+channel+thread) to the ts of the newest
+  // message we've started handling for it. A newer message in the same thread
+  // supersedes older in-flight handling so the bot answers the whole thread in
+  // one reply instead of replying to each message. See claimLatestSessionMessage.
+  private latestSessionMessageTs: Map<string, string> = new Map();
+
+  // Messages folded into the current coalescing window for a session, oldest
+  // first. When a follow-up supersedes an in-flight message we don't throw the
+  // earlier message away — its text is accumulated here so the single reply
+  // treats every message as one combined question rather than answering only
+  // the latest with the rest as background. Each entry also remembers whether
+  // that message @-mentioned the bot, so the one coalesced reply stays public
+  // in-thread when any folded message tagged the bot. See
+  // claimLatestSessionMessage / getCoalescedQuery / windowHasExplicitMention.
+  private coalescedSessionMessages: Map<
+    string,
+    { ts: string; text: string; explicitMention: boolean }[]
+  > = new Map();
 
   constructor(
     app: App,
@@ -92,6 +113,8 @@ export class SlackHandler {
       this.reactionManager,
       this.channelConfig,
     );
+    this.buttonMetadata = new ButtonMetadataStore();
+    this.buttonMetadata.startCleanup();
   }
 
   /**
@@ -107,7 +130,19 @@ export class SlackHandler {
         );
         if (voteButton?.value) {
           try {
-            return JSON.parse(voteButton.value);
+            const parsed = JSON.parse(voteButton.value);
+            if (parsed?.ref) {
+              const metadata = this.buttonMetadata.lookup(parsed.ref);
+              if (!metadata) return null;
+              return {
+                channel: metadata.channel,
+                channel_type: metadata.channelType,
+                root_ts: metadata.rootTs,
+                question: metadata.question,
+                answer: metadata.answer,
+              };
+            }
+            return parsed;
           } catch (e) {
             return null;
           }
@@ -115,27 +150,6 @@ export class SlackHandler {
       }
     }
     return null;
-  }
-
-  /**
-   * Calculate maximum text size that can fit in button value
-   */
-  private calculateMaxButtonTextSize(
-    channelId: string,
-    threadTs?: string,
-    votingData?: any,
-  ): number {
-    const baseData = {
-      channel: channelId,
-      thread_ts: threadTs,
-      voting_data: votingData,
-    };
-    const baseDataSize = JSON.stringify(baseData).length;
-    return (
-      SlackHandler.SLACK_BUTTON_VALUE_MAX_SIZE -
-      SlackHandler.BUTTON_VALUE_BUFFER_SIZE -
-      baseDataSize
-    );
   }
 
   /**
@@ -158,6 +172,9 @@ export class SlackHandler {
    * Check if reactions should be shown for this message (no reactions for ephemeral messages)
    */
   async shouldShowReactions(event: MessageEvent): Promise<boolean> {
+    // Smart-reply turns stay invisible until the bot actually posts a reply, so
+    // it never leaves a stray reaction on a message it decided to skip.
+    if (event.smartReply) return false;
     return !(await this.checkWillBeEphemeral(
       event.channel,
       !!event.explicitMention,
@@ -308,63 +325,19 @@ export class SlackHandler {
             (messageOptions.text?.length > 100 ? "..." : ""),
         });
         try {
-          let ephemeralText = messageOptions.text;
+          const ephemeralText = messageOptions.text;
 
-          // Calculate max text size for button values
-          // Strip out the 'answer' field from voting data to save space
-          let votingData = messageOptions.blocks
+          const votingData = messageOptions.blocks
             ? this.extractVotingData(messageOptions.blocks)
             : null;
 
-          // Remove the full answer text from voting data for size calculation
-          // We'll add it back later for each chunk
-          const votingDataForSizeCalc = votingData
-            ? { ...votingData, answer: undefined }
-            : null;
+          // Chunk by Slack's text limit — button values now use server-side
+          // refs so they no longer constrain the chunk size.
+          const messageChunks = splitMessageForSlack(ephemeralText);
 
-          const maxTextSize = this.calculateMaxButtonTextSize(
-            channelId,
-            messageOptions.thread_ts,
-            votingDataForSizeCalc,
-          );
-
-          // Split message into chunks if needed to fit within button value limit
-          const messageChunks: string[] = [];
-          if (ephemeralText.length <= maxTextSize) {
-            messageChunks.push(ephemeralText);
-          } else {
-            // Split into chunks that fit within button value size limit
-            // Account for chunk prefix like "[1/3] " (max ~10 chars)
-            const chunkMaxSize =
-              maxTextSize - SlackHandler.CHUNK_PREFIX_BUFFER_SIZE;
-
-            // Always log chunkMaxSize calculation
-            const baseData = {
-              channel: channelId,
-              thread_ts: messageOptions.thread_ts,
-              voting_data: votingDataForSizeCalc,
-            };
-            const baseDataSize = JSON.stringify(baseData).length;
-            this.logger.info("Ephemeral message chunking calculation", {
-              chunkMaxSize,
-              calculation: `${SlackHandler.SLACK_BUTTON_VALUE_MAX_SIZE} (limit) - ${SlackHandler.BUTTON_VALUE_BUFFER_SIZE} (buffer) - ${baseDataSize} (base) = ${maxTextSize}, then ${maxTextSize} - ${SlackHandler.CHUNK_PREFIX_BUFFER_SIZE} (prefix) = ${chunkMaxSize}`,
-              ephemeralTextLength: ephemeralText.length,
-            });
-
-            // Check if chunkMaxSize is too small to proceed
-            if (chunkMaxSize < SlackHandler.MIN_CHUNK_SIZE) {
-              this.logger.error(
-                `Cannot send ephemeral message: chunkMaxSize too small (< ${SlackHandler.MIN_CHUNK_SIZE})`,
-              );
-              return; // Exit early without sending
-            }
-
-            for (let i = 0; i < ephemeralText.length; i += chunkMaxSize) {
-              messageChunks.push(ephemeralText.substring(i, i + chunkMaxSize));
-            }
-
+          if (messageChunks.length > 1) {
             this.logger.info(
-              `Split long ephemeral message into ${messageChunks.length} chunks (original: ${ephemeralText.length} chars, max: ${maxTextSize} chars)`,
+              `Split ephemeral message into ${messageChunks.length} chunks (${ephemeralText.length} chars)`,
             );
           }
 
@@ -375,42 +348,19 @@ export class SlackHandler {
             let userSkipped = false;
             for (let i = 0; i < messageChunks.length; i++) {
               const chunk = messageChunks[i];
-              const chunkPrefix =
-                messageChunks.length > 1
-                  ? `[${i + 1}/${messageChunks.length}] `
-                  : "";
-              const chunkText = chunkPrefix + chunk;
 
-              const ephemeralBaseOptions: any = {
+              const chunkBlocks: any[] = this.buildTextAndImageBlocks(chunk);
+
+              // Store full metadata server-side; button value is just a ref.
+              const ref = this.buttonMetadata.save({
                 channel: channelId,
-                text: chunkText,
-                thread_ts: messageOptions.thread_ts,
-                unfurl_links: messageOptions.unfurl_links,
-                unfurl_media: messageOptions.unfurl_media,
-              };
-
-              // Create fresh blocks for each chunk with the chunked text
-              // Don't reuse messageOptions.blocks as they contain the full message
-              const chunkBlocks: any[] =
-                this.buildTextAndImageBlocks(chunkText);
-
-              // Add "Post to Channel" and "Delete" buttons
-              // Use minimal voting data without the full answer to save space
-              const minimalVotingData = votingData
-                ? {
-                    channel: votingData.channel,
-                    root_ts: votingData.root_ts,
-                    question: votingData.question,
-                    // Don't include the full answer - it's already in the chunk text
-                  }
-                : null;
-
-              const buttonData = JSON.stringify({
-                channel: channelId,
-                thread_ts: messageOptions.thread_ts,
-                voting_data: minimalVotingData,
-                text: chunkText,
+                channelType: channelType,
+                threadTs: messageOptions.thread_ts,
+                text: chunk,
+                question: votingData?.question,
+                rootTs: votingData?.root_ts,
               });
+              const refValue = JSON.stringify({ ref });
 
               chunkBlocks.push({
                 type: "actions",
@@ -423,7 +373,7 @@ export class SlackHandler {
                       emoji: true,
                     },
                     action_id: "post_to_channel",
-                    value: buttonData,
+                    value: refValue,
                   },
                   {
                     type: "button",
@@ -434,14 +384,20 @@ export class SlackHandler {
                     },
                     action_id: "delete_ephemeral",
                     style: "danger",
-                    value: buttonData,
+                    value: refValue,
                   },
                 ],
               });
 
-              ephemeralBaseOptions.blocks = chunkBlocks;
-
-              const ephemeralOptions = { ...ephemeralBaseOptions, user };
+              const ephemeralOptions: any = {
+                channel: channelId,
+                text: chunk,
+                thread_ts: messageOptions.thread_ts,
+                unfurl_links: messageOptions.unfurl_links,
+                unfurl_media: messageOptions.unfurl_media,
+                blocks: chunkBlocks,
+                user,
+              };
               try {
                 const result =
                   await this.app.client.chat.postEphemeral(ephemeralOptions);
@@ -545,7 +501,6 @@ export class SlackHandler {
             skippedCount,
             failedCount: results.length - successCount,
             originalTextLength: ephemeralText.length,
-            maxTextSize,
           });
 
           if (results.length === 0) {
@@ -654,6 +609,44 @@ export class SlackHandler {
           event.ts,
         );
 
+        // Fold rapid thread follow-ups into a single reply: mark this as the
+        // newest message for the conversation, accumulate its text into the
+        // coalescing window, and cancel any in-flight handling of an earlier
+        // message in the same thread. A stale (older/out-of-order) delivery
+        // bails here — the newest message answers the whole thread, and the
+        // earlier messages' text is already folded into its combined query.
+        if (
+          !this.claimLatestSessionMessage(
+            sessionKey,
+            event.ts,
+            event.text,
+            !!event.explicitMention,
+          )
+        ) {
+          this.logger.info(
+            "Skipping message superseded by a newer thread reply",
+            {
+              messageId,
+              link: generateSlackMessageLink(event.channel, event.ts),
+            },
+          );
+          return;
+        }
+
+        // This run will answer every message folded into the burst, so an
+        // @-mention on any of them makes the whole run explicitly mentioned.
+        // Upgrade the event in place (callers pass a fresh per-message object)
+        // so every downstream consumer — mode resolution, prompt context,
+        // action injection, reactions, and delivery — agrees on it. A
+        // single-message window resolves to the event's own flag, so nothing
+        // changes there.
+        if (
+          !event.explicitMention &&
+          this.windowHasExplicitMention(sessionKey)
+        ) {
+          event.explicitMention = true;
+        }
+
         // Handle special cases
         if (await this.handleSpecialCommands(event, say)) {
           return;
@@ -685,6 +678,17 @@ export class SlackHandler {
           return;
         }
 
+        // A newer thread message may have arrived while we prepared this one.
+        // Bail before spending a model call — the newer message answers the
+        // whole thread.
+        if (!this.isLatestSessionMessage(sessionKey, event.ts)) {
+          return await this.finishSuperseded(
+            event,
+            processedFiles,
+            reactionKey,
+          );
+        }
+
         // Get or create session
         const session = await this.getOrCreateSession(event);
 
@@ -704,6 +708,16 @@ export class SlackHandler {
           timings,
         );
 
+        // If a newer thread message superseded us while we were thinking, let
+        // it post the combined reply instead of adding a second, redundant one.
+        if (!this.isLatestSessionMessage(sessionKey, event.ts)) {
+          return await this.finishSuperseded(
+            event,
+            processedFiles,
+            reactionKey,
+          );
+        }
+
         // Send response
         await this.sendResponse(
           event,
@@ -716,6 +730,7 @@ export class SlackHandler {
 
         // Cleanup
         await this.cleanup(processedFiles, sessionKey, reactionKey);
+        this.releaseLatestSessionMessage(sessionKey, event.ts);
 
         // Log final response with timing, token usage, and tracking link
         const duration = Date.now() - startTime;
@@ -933,10 +948,125 @@ export class SlackHandler {
     if (event.explicitMention || isBotAuthoredMessage(event)) {
       return false;
     }
+    // Smart-reply turns aren't gated by participant count: if someone asks a
+    // question the bot can answer, it should try to help even in a busy channel.
+    // The classifier + final "help or stay silent" check already keep it quiet
+    // when it can't add value.
+    if (event.smartReply) {
+      return false;
+    }
     return this.hasTwoOrMoreHumanParticipants(
       event.channel,
       event.thread_ts || event.ts,
     );
+  }
+
+  /**
+   * Decide whether to proactively reply to a message the bot wasn't mentioned
+   * in, using layered filtering to keep cost/noise down:
+   *   1. Normalize the event; hand off to app_mention if it was actually a mention.
+   *   2. Free structural checks (bot/marker skip, length).
+   *   3. Cheap Haiku classifier — "could the bot help with this?".
+   * Only if all layers pass does it invoke the full pipeline with `smartReply`
+   * set, where Claude still gets a final "help or stay silent" contract.
+   * Note: unlike mention/conditional flows, smart reply intentionally does NOT
+   * gate on participant count — a question the bot can answer should be answered
+   * even in a busy channel (see shouldSkipDueToMultipleParticipants).
+   */
+  private async handleSmartReplyCandidate(
+    message: MessageEvent,
+    channelName: string | undefined,
+    say: any,
+  ): Promise<void> {
+    // Correlate every smart-reply log line (including the Haiku classifier's)
+    // with the same message identifier used elsewhere, and log a clickable
+    // Slack link so a skipped candidate can be traced back to the message.
+    const messageId = generateMessageId(message.channel, message.ts);
+    const link = generateSlackMessageLink(message.channel, message.ts);
+    return withMessageId(messageId, async () => {
+      try {
+        const { event } = await this.prepareEventForHandling(
+          message,
+          channelName,
+        );
+
+        // Explicit mentions are handled by the app_mention listener — don't
+        // double-handle (which would post two replies).
+        if (event.explicitMention) {
+          this.logger.debug("Smart reply: deferring to app_mention (mention)", {
+            link,
+          });
+          return;
+        }
+
+        // Free structural filters (Layer 1). shouldSkipMessage drops bot posts
+        // and suppression markers.
+        if (await this.shouldSkipMessage(event)) {
+          this.logger.info("🤖 Smart reply skipped: message filtered", {
+            link,
+          });
+          return;
+        }
+        if (!passesSmartReplyStructuralFilter(event.text)) {
+          this.logger.info("🤖 Smart reply skipped: failed structural filter", {
+            link,
+            textLength: (event.text || "").length,
+          });
+          return;
+        }
+
+        // Cheap classifier (Layer 2). Only spend a full run when the bot could
+        // plausibly help. Every YES/NO decision, latency, and Haiku cost is
+        // tracked via slack_ai_bot_message_classification.
+        const classifierStart = Date.now();
+        const { couldHelp, costUsd: classifierCostUsd } =
+          await classifySmartReplyCandidate(event.text || "");
+        const classifierLatencyMs = Date.now() - classifierStart;
+        this.logger.info("🤖 Smart reply classifier decision", {
+          link,
+          couldHelp,
+          costUsd: classifierCostUsd,
+        });
+        try {
+          await trackMessageClassification({
+            slackUserId: event.user,
+            slackUsername: await UserUtils.getUsername(this.app, event.user),
+            slackHandle: await UserUtils.getSlackHandle(this.app, event.user),
+            slackChannel: event.channel,
+            slackChannelType: event.channel_type,
+            slackChannelName: await this.channelConfig.getChannelName(
+              event.channel,
+              event.channel_type,
+            ),
+            slackThreadTs: event.thread_ts,
+            slackMessageLink: generateSlackMessageLink(event.channel, event.ts),
+            slackAppQuestion: event.text || "",
+            latencyMs: classifierLatencyMs,
+            costUsd: classifierCostUsd,
+            couldHelp,
+          });
+        } catch (trackingError) {
+          this.logger.warn(
+            "Failed to track message classification",
+            trackingError,
+          );
+        }
+        if (!couldHelp) return;
+
+        await this.handleMessage(
+          {
+            ...event,
+            smartReply: true,
+          },
+          say,
+        );
+      } catch (error) {
+        this.logger.error("Error in smart reply candidate handling", {
+          error,
+          link,
+        });
+      }
+    });
   }
 
   /**
@@ -1016,6 +1146,28 @@ export class SlackHandler {
   ) {
     const promptStart = Date.now();
 
+    // Fold every question from this coalescing window into one combined query
+    // so the single reply answers all of them, not just the latest. The
+    // folded messages still appear in the thread context below, so the bot
+    // keeps the full picture (including any file references).
+    const sessionKey = this.claudeHandler.getSessionKey(
+      event.user,
+      event.channel,
+      event.thread_ts || event.ts,
+    );
+    const combinedQuery = this.getCoalescedQuery(sessionKey);
+
+    // A coalesced burst must not resume. Each superseded sibling already
+    // resumed this session and appended its own (growing) copy of the
+    // questions as a user turn before being aborted, so resuming here would
+    // replay the same questions across several turns — the model reads the
+    // earlier ones as already-handled and answers only the newest. Start fresh
+    // instead: the combined query plus the thread context below carry the full
+    // history, so the single reply addresses every folded question.
+    if (combinedQuery) {
+      session.sessionId = undefined;
+    }
+
     const threadData = await this.getThreadData(event);
 
     // Prepare final prompt and system prompt separately
@@ -1023,6 +1175,7 @@ export class SlackHandler {
       event,
       processedFiles,
       threadData,
+      combinedQuery,
     );
     if (timings) {
       timings.prompt_assembly_ms = Date.now() - promptStart;
@@ -1042,10 +1195,10 @@ export class SlackHandler {
       explicitMention: event.explicitMention,
       replyBroadcast: event.replyBroadcast,
       isNonEphemeralConditionalChannel: isNonEphemeralConditional ?? false,
+      smartReply: event.smartReply ?? false,
       reactionKey: (await this.shouldShowReactions(event))
         ? reactionKey
         : undefined,
-      workingDirectory: session.workingDirectory,
     };
 
     // Message triggers in event.text override the channel-level default.
@@ -1066,7 +1219,6 @@ export class SlackHandler {
       userPrompt,
       session,
       abortController,
-      session.workingDirectory,
       slackContext,
       reactionKey,
       systemPrompt,
@@ -1098,12 +1250,14 @@ export class SlackHandler {
     event: MessageEvent,
     processedFiles: ProcessedFile[],
     threadData?: ThreadData,
+    combinedQuery?: string,
   ): Promise<{ userPrompt: string; systemPrompt: string }> {
     // Build the system prompt from context files
     const generalContext = await this.channelConfig.getGeneralContextForChannel(
       event.channel_type,
       !!event.explicitMention,
       event.text,
+      event.smartReply,
     );
     const channelContext = await this.getChannelContext(
       event.channel,
@@ -1174,10 +1328,14 @@ export class SlackHandler {
     }
 
     // 6. User query at the end
-    // Provide a default message if files were uploaded but no text was provided
+    // When rapid thread follow-ups were coalesced, combinedQuery holds every
+    // folded message's text as one question. Otherwise fall back to this
+    // message's text, defaulting to a files prompt when only files were sent.
     const hasFiles = processedFiles.length > 0;
     const userText =
-      event.text || (hasFiles ? "Please analyze the uploaded files." : "");
+      combinedQuery ||
+      event.text ||
+      (hasFiles ? "Please analyze the uploaded files." : "");
     sections.push(`## User Query:\n${userText}`);
 
     const userPrompt = sections.join("\n\n");
@@ -1347,6 +1505,20 @@ export class SlackHandler {
     original_root_ts?: string;
     chunk_ts?: string[];
   }): any {
+    const ref = this.buttonMetadata.save({
+      channel: data.channel,
+      channelType: data.channel_type,
+      rootTs: data.root_ts,
+      question: data.question,
+      answer: data.answer,
+      messageText: data.message_text,
+      threadTs: data.thread_ts,
+      originalQuestion: data.original_question,
+      originalAnswer: data.original_answer,
+      originalRootTs: data.original_root_ts,
+      chunkTs: data.chunk_ts,
+    });
+    const value = JSON.stringify({ ref });
     return {
       type: "actions",
       elements: [
@@ -1354,26 +1526,26 @@ export class SlackHandler {
           type: "button",
           text: { type: "plain_text", text: "👍 Good", emoji: true },
           action_id: "vote_up",
-          value: this.createSafeButtonValue(data),
+          value,
         },
         {
           type: "button",
           text: { type: "plain_text", text: "👌 Ok", emoji: true },
           action_id: "vote_ok",
-          value: this.createSafeButtonValue(data),
+          value,
         },
         {
           type: "button",
           text: { type: "plain_text", text: "👎 Bad", emoji: true },
           action_id: "vote_down",
-          value: this.createSafeButtonValue(data),
+          value,
         },
         {
           type: "button",
           text: { type: "plain_text", text: "🗑️ Delete", emoji: true },
           action_id: "delete_message",
           style: "danger",
-          value: this.createSafeButtonValue(data),
+          value,
         },
       ],
     };
@@ -1437,83 +1609,6 @@ export class SlackHandler {
     }
 
     return result;
-  }
-
-  /**
-   * Create safe button value that stays under Slack's 2001 character limit
-   */
-  private createSafeButtonValue(data: {
-    channel: string;
-    channel_type?: SlackChannelType;
-    root_ts?: string;
-    question?: string;
-    answer?: string;
-    message_text?: string;
-    thread_ts?: string;
-    original_question?: string;
-    original_answer?: string;
-    original_root_ts?: string;
-    chunk_ts?: string[];
-  }): string {
-    const safeData: any = { channel: data.channel };
-    if (data.channel_type) safeData.channel_type = data.channel_type;
-    if (data.root_ts) safeData.root_ts = data.root_ts;
-    if (data.thread_ts) safeData.thread_ts = data.thread_ts;
-    if (data.original_root_ts)
-      safeData.original_root_ts = data.original_root_ts;
-    if (data.chunk_ts && data.chunk_ts.length > 0)
-      safeData.chunk_ts = data.chunk_ts.slice(0, 15);
-
-    const textKeys = [
-      "question",
-      "answer",
-      "message_text",
-      "original_question",
-      "original_answer",
-    ] as const;
-    const presentKeys = textKeys.filter(k => data[k]);
-    if (presentKeys.length === 0) {
-      return JSON.stringify(safeData);
-    }
-
-    // Slack's limit applies to the serialized value, where escape sequences
-    // (\n, \", \\) and the `"key":"",` syntax inflate the length beyond the
-    // raw text, so budget JSON-encoded lengths rather than raw char counts.
-    const getEncodedLength = (s: string): number =>
-      JSON.stringify(s).length - 2;
-    const shell: any = { ...safeData };
-    for (const key of presentKeys) {
-      shell[key] = "";
-    }
-    const budgetPerKey = Math.floor(
-      (SlackHandler.SLACK_BUTTON_VALUE_MAX_SIZE -
-        JSON.stringify(shell).length) /
-        presentKeys.length,
-    );
-
-    const truncateToBudget = (s: string, budget: number): string => {
-      if (getEncodedLength(s) <= budget) return s;
-      const ellipsis = "...";
-      if (budget <= ellipsis.length) return "";
-      // Longest prefix whose encoded length, plus the ellipsis, fits the budget
-      let lo = 0;
-      let hi = s.length;
-      while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2);
-        if (getEncodedLength(s.substring(0, mid)) + ellipsis.length <= budget) {
-          lo = mid;
-        } else {
-          hi = mid - 1;
-        }
-      }
-      return s.substring(0, lo) + ellipsis;
-    };
-
-    for (const key of presentKeys) {
-      safeData[key] = truncateToBudget(data[key]!, budgetPerKey);
-    }
-
-    return JSON.stringify(safeData);
   }
 
   /**
@@ -1598,7 +1693,13 @@ export class SlackHandler {
     }
 
     // Track every turn that produced content, even when the post was muted.
-    if (result.messages.length > 0) {
+    // Also track DO_NOT_RESPOND runs (often no message content) so Opus cost
+    // and the agent's silence decision stay visible.
+    if (
+      result.messages.length > 0 ||
+      result.shouldNotRespond ||
+      result.doNotRespondOptOut
+    ) {
       try {
         const latencyMs = startTime ? Date.now() - startTime : 0;
         if (phaseTimings) phaseTimings.total_ms = latencyMs;
@@ -1627,6 +1728,8 @@ export class SlackHandler {
           turnCount: result.turnCount,
           phaseTimings,
           isOpusFastMode: result.requestMode?.fast ?? false,
+          isSmartReply: event.smartReply ?? false,
+          agentCouldHelp: !result.doNotRespondOptOut,
         });
       } catch (trackingError) {
         this.logger.warn(
@@ -1636,8 +1739,9 @@ export class SlackHandler {
       }
     }
 
-    // Update final reaction (skip entirely for ephemeral messages)
-    if (!willBeEphemeral && (await this.shouldShowReactions(event))) {
+    // Update final reaction (skip entirely for ephemeral messages; smart-reply
+    // turns never got a reaction to complete).
+    if (!willBeEphemeral && !event.smartReply) {
       // Custom actions own their reaction lifecycle end-to-end
       // (waiting-on-human → complete/error, driven by the registry).
       const registryOwnsReaction = result.confirmationDialogPosted === true;
@@ -1744,9 +1848,26 @@ export class SlackHandler {
         event.explicitMention,
       );
     } else {
-      this.logger.error("Request was aborted", { reactionKey });
+      // An abort almost always means a newer message in the same thread
+      // superseded this one (see claimLatestSessionMessage). Mark it skipped
+      // rather than errored — the newer message answers the whole thread.
+      const sessionKey = this.claudeHandler.getSessionKey(
+        event.user,
+        event.channel,
+        event.thread_ts || event.ts,
+      );
+      const superseded = !this.isLatestSessionMessage(sessionKey, event.ts);
+      this.logger.info(
+        superseded
+          ? "Request superseded by a newer thread message"
+          : "Request was aborted",
+        { reactionKey },
+      );
       if (await this.shouldShowReactions(event)) {
-        await this.reactionManager.updateReaction(reactionKey, REACTIONS.ERROR);
+        await this.reactionManager.updateReaction(
+          reactionKey,
+          superseded ? REACTIONS.SKIPPED : REACTIONS.ERROR,
+        );
       }
     }
   }
@@ -1852,6 +1973,134 @@ export class SlackHandler {
       event.thread_ts || event.ts,
     );
     return `${sessionKey}:${event.ts}`;
+  }
+
+  /**
+   * Register `ts` as the newest message for its conversation session, fold its
+   * text into the coalescing window, and cancel any in-flight handling of an
+   * earlier message in the same thread. Returns false when an equal or newer
+   * message already owns the session, so this (stale/out-of-order) delivery
+   * should be dropped — the newer message answers the thread, and its context
+   * already includes this message.
+   *
+   * The earlier message isn't discarded: its text stays in the window (see
+   * getCoalescedQuery) so the single reply answers every folded message as one
+   * combined question, not just the latest.
+   *
+   * Synchronous by design: the read, the write, and the abort happen with no
+   * `await` between them, so two concurrent deliveries can't both take the claim.
+   */
+  private claimLatestSessionMessage(
+    sessionKey: string,
+    ts: string,
+    text?: string,
+    explicitMention?: boolean,
+  ): boolean {
+    const current = this.latestSessionMessageTs.get(sessionKey);
+    if (current !== undefined && !this.isNewerTs(ts, current)) {
+      return false;
+    }
+    // A brand-new window starts fresh; a follow-up appends to the running one.
+    const window =
+      current === undefined ? [] : this.getCoalescedWindow(sessionKey);
+    if (!window.some(m => m.ts === ts)) {
+      window.push({
+        ts,
+        text: text ?? "",
+        explicitMention: !!explicitMention,
+      });
+    }
+    this.coalescedSessionMessages.set(sessionKey, window);
+    this.latestSessionMessageTs.set(sessionKey, ts);
+    // Stop the now-superseded run; its reply guards keep it from posting.
+    this.activeControllers.get(sessionKey)?.abort();
+    return true;
+  }
+
+  /** True until a newer message in the same thread supersedes `ts`. */
+  private isLatestSessionMessage(sessionKey: string, ts: string): boolean {
+    return this.latestSessionMessageTs.get(sessionKey) === ts;
+  }
+
+  /** Drop the coalescing marker + window once the latest message is answered. */
+  private releaseLatestSessionMessage(sessionKey: string, ts: string): void {
+    if (this.latestSessionMessageTs.get(sessionKey) === ts) {
+      this.latestSessionMessageTs.delete(sessionKey);
+      this.coalescedSessionMessages.delete(sessionKey);
+    }
+  }
+
+  /** Messages folded into the session's current coalescing window, oldest first. */
+  private getCoalescedWindow(
+    sessionKey: string,
+  ): { ts: string; text: string; explicitMention: boolean }[] {
+    return this.coalescedSessionMessages.get(sessionKey) ?? [];
+  }
+
+  /**
+   * True when any message folded into the session's coalescing window
+   * @-mentioned the bot. The burst gets a single reply, so an @-mention on any
+   * folded message must make that reply public in-thread — otherwise tagging
+   * the bot and then adding a follow-up would silently downgrade the answer to
+   * an ephemeral message only the requester can see.
+   *
+   * For a window holding a single message this is just that message's own
+   * explicitMention, so single-message handling is unchanged.
+   */
+  private windowHasExplicitMention(sessionKey: string): boolean {
+    return this.getCoalescedWindow(sessionKey).some(m => m.explicitMention);
+  }
+
+  /**
+   * Build the combined user query for the winning message from every message
+   * folded into its coalescing window (oldest first), so the single reply
+   * answers every question in the thread rather than only the latest. Returns
+   * undefined when the window holds one question or fewer, so the caller keeps
+   * its normal single-message prompt. The folded messages are intentionally
+   * left in the thread context too, so nothing (e.g. file references) is lost.
+   */
+  private getCoalescedQuery(sessionKey: string): string | undefined {
+    const texts = this.getCoalescedWindow(sessionKey)
+      .map(m => m.text.trim())
+      .filter(text => text.length > 0);
+    return texts.length > 1 ? texts.join("\n\n") : undefined;
+  }
+
+  /** Compare two Slack `seconds.micros` timestamps; true when `a` is newer. */
+  private isNewerTs(a: string, b: string): boolean {
+    const [aSec, aMicro = "0"] = a.split(".");
+    const [bSec, bMicro = "0"] = b.split(".");
+    const aSeconds = Number(aSec);
+    const bSeconds = Number(bSec);
+    if (aSeconds !== bSeconds) return aSeconds > bSeconds;
+    return Number(aMicro) > Number(bMicro);
+  }
+
+  /**
+   * A newer message in the same thread has taken over answering this
+   * conversation. Release this message's temp files and clear its in-progress
+   * reaction so the bot posts a single combined reply instead of one per
+   * message. Deliberately leaves the session's abort controller and coalescing
+   * marker alone — those now belong to the newer message.
+   */
+  private async finishSuperseded(
+    event: MessageEvent,
+    processedFiles: ProcessedFile[],
+    reactionKey: string,
+  ): Promise<void> {
+    this.logger.info("Folded into a newer thread message; skipping reply", {
+      link: generateSlackMessageLink(event.channel, event.ts),
+    });
+    if (processedFiles.length > 0) {
+      await this.fileHandler.cleanupTempFiles(processedFiles);
+    }
+    // A message that @-mentioned the bot was answered by the combined reply,
+    // not skipped — clear any in-progress reaction instead of the SKIPPED one.
+    if (event.explicitMention) {
+      await this.reactionManager.clearReaction(reactionKey);
+    } else if (await this.shouldShowReactions(event)) {
+      await this.reactionManager.updateReaction(reactionKey, REACTIONS.SKIPPED);
+    }
   }
 
   /** Register the message for reaction tracking, add SKIPPED reaction, return true. */
@@ -1996,6 +2245,23 @@ export class SlackHandler {
               userId: message.user ?? message.bot_id ?? "undefined",
               textPreview: (message.text || "").substring(0, 100),
             });
+          }
+        } else if (!isBotMessage && !isDM && !isConditionalChannel) {
+          // Proactive smart reply: only consider channels on the include list.
+          // Ineligible channels return immediately — no routing log, classifier,
+          // or tracking.
+          if (
+            channelName &&
+            (await this.channelConfig.isSmartReplyEligibleChannelName(
+              channelName,
+              channelType,
+            ))
+          ) {
+            await this.handleSmartReplyCandidate(
+              { ...message, channel_type: channelType } as MessageEvent,
+              channelName,
+              say,
+            );
           }
         }
       }
@@ -2179,7 +2445,8 @@ export class SlackHandler {
           const action = body?.actions?.[0];
           const userId = body?.user?.id;
 
-          // Parse the button data
+          // Parse the button data — new format uses a server-side ref,
+          // legacy format has inline fields.
           let responseData: any = null;
           try {
             responseData = JSON.parse(action?.value || "{}");
@@ -2188,10 +2455,31 @@ export class SlackHandler {
             return;
           }
 
-          const channel = responseData.channel || body?.container?.channel_id;
-          let threadTs = responseData.thread_ts; // Use let to allow reassignment in the loop
-          const votingData = responseData.voting_data;
-          const messageText = responseData.text || "";
+          let channel: string;
+          let threadTs: string | undefined;
+          let votingData: any;
+          let messageText: string;
+
+          if (responseData.ref) {
+            const metadata = this.buttonMetadata.lookup(responseData.ref);
+            if (!metadata) {
+              this.logger.warn("Button metadata expired for post_to_channel");
+              return;
+            }
+            channel = metadata.channel;
+            threadTs = metadata.threadTs;
+            messageText = metadata.text || "";
+            votingData = {
+              channel_type: metadata.channelType,
+              root_ts: metadata.rootTs,
+              question: metadata.question,
+            };
+          } else {
+            channel = responseData.channel || body?.container?.channel_id;
+            threadTs = responseData.thread_ts;
+            votingData = responseData.voting_data;
+            messageText = responseData.text || "";
+          }
 
           if (!messageText || !channel) {
             this.logger.warn(
@@ -2403,6 +2691,30 @@ export class SlackHandler {
       if (!action?.value) return null;
       const parsed = JSON.parse(action.value);
       if (typeof parsed !== "object" || parsed === null) return null;
+      if (parsed.ref) {
+        const metadata = this.buttonMetadata.lookup(parsed.ref);
+        // Stale ref (TTL expiry or lost flush) — a bare { ref } gives callers
+        // nothing usable, so treat it as unparseable. Log it: callers fall back
+        // to the interaction body, so the click still registers and the only
+        // outward sign is an earlier chunk of a split reply surviving a delete.
+        if (!metadata) {
+          this.logger.warn("Button metadata expired", { ref: parsed.ref });
+          return null;
+        }
+        return {
+          channel: metadata.channel,
+          channel_type: metadata.channelType,
+          root_ts: metadata.rootTs,
+          question: metadata.question,
+          answer: metadata.answer,
+          message_text: metadata.messageText,
+          thread_ts: metadata.threadTs,
+          original_question: metadata.originalQuestion,
+          original_answer: metadata.originalAnswer,
+          original_root_ts: metadata.originalRootTs,
+          chunk_ts: metadata.chunkTs,
+        };
+      }
       return parsed;
     } catch (_) {
       return null;
@@ -2572,7 +2884,7 @@ export class SlackHandler {
       shouldHandle,
       event: {
         ...message,
-        text: combinedText || text,
+        text: text || combinedText,
         explicitMention,
         replyBroadcast,
       },

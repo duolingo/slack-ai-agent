@@ -2,7 +2,7 @@
 jest.mock("./config", () => ({
   config: {
     slack: { botToken: "xoxb-test", appToken: "xapp-test", signingSecret: "s" },
-    anthropic: { apiKey: "test-key", model: "claude-opus-4-8" },
+    anthropic: { apiKey: "test-key", model: "claude-opus-5" },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
     persistDir: "/tmp/test-persist",
@@ -30,8 +30,11 @@ jest.mock("js-yaml", () => ({
   }),
 }));
 
+import { load } from "js-yaml";
 import { ChannelConfigManager } from "./channel-config";
 import { SlackChannelType } from "./types";
+
+const mockedYamlLoad = load as jest.Mock;
 
 describe("ChannelConfigManager", () => {
   let manager: ChannelConfigManager;
@@ -159,6 +162,123 @@ describe("ChannelConfigManager", () => {
     it('defaults to "im" when app is not set', async () => {
       const noAppManager = new ChannelConfigManager();
       expect(await noAppManager.lookupChannelType("C123")).toBe("im");
+    });
+  });
+
+  describe("isSmartReplyEligibleChannelName", () => {
+    const configWith = (smartReply: unknown) => ({
+      channelSettings: [],
+      conditionalReplyChannels: [],
+      ephemeralChannelConfig: {},
+      dmNotificationConfig: {},
+      smartReply,
+    });
+
+    it("is disabled everywhere when the include list is empty", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: [] }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "some-public-channel",
+          "channel",
+        ),
+      ).toBe(false);
+    });
+
+    it("returns false when smartReply config is absent", async () => {
+      mockedYamlLoad.mockReturnValue(configWith(undefined));
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "some-public-channel",
+          "channel",
+        ),
+      ).toBe(false);
+    });
+
+    it("returns false when the channel name is missing", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: ["^team$"] }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName(undefined, "channel"),
+      ).toBe(false);
+    });
+
+    it("returns false for direct messages", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: [".*"] }),
+      );
+      expect(await manager.isSmartReplyEligibleChannelName("team", "im")).toBe(
+        false,
+      );
+    });
+
+    it('is eligible in every channel when include is [".*"]', async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: [".*"] }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "general-discussion",
+          "channel",
+        ),
+      ).toBe(true);
+    });
+
+    it("is eligible in private channels the bot was added to", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: [".*"] }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName("group-alpha", "group"),
+      ).toBe(true);
+    });
+
+    it("restricts to the include list when one is configured", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({
+          includeChannelNamePatterns: ["^project-"],
+        }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "project-alpha",
+          "channel",
+        ),
+      ).toBe(true);
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "random-channel",
+          "channel",
+        ),
+      ).toBe(false);
+    });
+
+    it("returns false for channels outside the include list", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({ includeChannelNamePatterns: ["^team$"] }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName(
+          "random-channel",
+          "channel",
+        ),
+      ).toBe(false);
+    });
+
+    it("returns true for channels on the include list", async () => {
+      mockedYamlLoad.mockReturnValue(
+        configWith({
+          includeChannelNamePatterns: ["^private-team$", "^team$"],
+        }),
+      );
+      expect(
+        await manager.isSmartReplyEligibleChannelName("team", "channel"),
+      ).toBe(true);
+      expect(
+        await manager.isSmartReplyEligibleChannelName("private-team", "group"),
+      ).toBe(true);
     });
   });
 });

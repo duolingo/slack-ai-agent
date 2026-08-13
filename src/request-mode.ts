@@ -1,7 +1,7 @@
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AllowedModel =
-  | "claude-opus-4-8"
+  | "claude-opus-5"
   | "claude-sonnet-5"
   | "claude-haiku-4-5"
   | "claude-fable-5";
@@ -21,7 +21,7 @@ export interface ChannelModeConfig {
   fastModeTagBot?: boolean;
 }
 
-export const OPUS_MODEL: AllowedModel = "claude-opus-4-8";
+export const OPUS_MODEL: AllowedModel = "claude-opus-5";
 export const SONNET_MODEL: AllowedModel = "claude-sonnet-5";
 export const HAIKU_MODEL: AllowedModel = "claude-haiku-4-5";
 export const FABLE_MODEL: AllowedModel = "claude-fable-5";

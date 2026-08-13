@@ -9,6 +9,7 @@ import {
 import {
   EventHandler,
   MessageProcessedEvent,
+  MessageClassificationEvent,
   FeedbackEvent,
   truncateText,
 } from "./tracking-types";
@@ -20,6 +21,7 @@ const logger = new Logger("Tracking");
 
 type EventType =
   | "slack_ai_bot_message_processed"
+  | "slack_ai_bot_message_classification"
   | "slack_ai_bot_message_feedback";
 
 type Properties = Record<
@@ -104,6 +106,8 @@ export class HttpEventHandler implements EventHandler {
       cost_usd: params.costUsd,
       turn_count: params.turnCount,
       is_opus_fast_mode: params.isOpusFastMode,
+      is_smart_reply: params.isSmartReply,
+      agent_could_help: params.agentCouldHelp,
     };
 
     // Serialize phase timings as an array of "name:duration_ms" strings to
@@ -139,6 +143,55 @@ export class HttpEventHandler implements EventHandler {
       client: { client_id: config.trackingClientId },
       event_timestamp: Date.now(),
       event_type: "slack_ai_bot_message_processed",
+    };
+
+    await this.sendEvent(payload);
+  }
+
+  async onMessageClassification(
+    params: MessageClassificationEvent,
+  ): Promise<void> {
+    await this.base.onMessageClassification(params);
+
+    const includeContent = await this.checkContentLogging(
+      params.slackChannel,
+      params.slackChannelType,
+    );
+
+    const properties: Properties = {
+      slack_username: params.slackUsername,
+      slack_handle: params.slackHandle,
+      slack_channel: params.slackChannel,
+      slack_channel_name: redactChannelName(
+        params.slackChannelName,
+        params.slackChannelType,
+        includeContent,
+      ),
+      slack_thread_ts: params.slackThreadTs,
+      slack_message_link: params.slackMessageLink,
+      slack_bot_question_length: params.slackAppQuestion.length,
+      latency_ms: params.latencyMs,
+      cost_usd: params.costUsd,
+      smart_reply_classifier_could_help: params.couldHelp,
+    };
+
+    if (includeContent) {
+      properties.slack_bot_question = truncateText(
+        params.slackAppQuestion,
+        TRACKING_FIELD_MAX_LENGTH,
+      );
+    }
+
+    const attributes = await this.buildAttributesWithDistinctId(
+      params,
+      properties,
+    );
+
+    const payload: TrackingPayload = {
+      attributes,
+      client: { client_id: config.trackingClientId },
+      event_timestamp: Date.now(),
+      event_type: "slack_ai_bot_message_classification",
     };
 
     await this.sendEvent(payload);
