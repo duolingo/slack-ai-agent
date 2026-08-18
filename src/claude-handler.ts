@@ -566,11 +566,6 @@ export class ClaudeHandler {
       });
     }, onRetry);
 
-    // Once the SDK yields a terminal limit result (budget/turns), the run is
-    // over — we want to deliver whatever the agent produced so far, not retry.
-    // The SDK raises after yielding that result; we swallow that raise so the
-    // stream ends cleanly and the caller (message-processor) can reply with
-    // the partial content plus the limit note from processResultMessage.
     // Abort the query if the SDK yields nothing for TURN_IDLE_TIMEOUT_MS.
     const timedGenerator = withTurnIdleTimeout(
       generator,
@@ -584,6 +579,11 @@ export class ClaudeHandler {
       },
     );
 
+    // Once the SDK yields a terminal limit result (budget/turns), the run is
+    // over — we want to deliver whatever the agent produced so far, not retry.
+    // The SDK raises after yielding that result; we swallow that raise so the
+    // stream ends cleanly and the caller (message-processor) can reply with
+    // the partial content plus the limit note from processResultMessage.
     let hitTerminalLimit = false;
     try {
       for await (const message of timedGenerator) {
