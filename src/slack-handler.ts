@@ -1825,7 +1825,10 @@ export class SlackHandler {
       }
 
       let errorMessage = "❌ Something went wrong";
-      if (error?.message?.includes("timed out")) {
+      if (error?.name === "TurnTimeoutError") {
+        errorMessage =
+          "⏱️ Request timed out — a single step ran too long without progress. Please try again or narrow your request.";
+      } else if (error?.message?.includes("timed out")) {
         errorMessage = "❌ Request timed out after retries. Please try again.";
       } else if (error?.message?.includes("aborted")) {
         errorMessage = "⏹️ Request was cancelled.";

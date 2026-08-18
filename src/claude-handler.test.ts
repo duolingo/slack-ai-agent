@@ -35,6 +35,8 @@ import {
   DEFAULT_SESSION_MAX_AGE_MS,
   shouldInjectActions,
   buildSanitizedEnv,
+  withTurnIdleTimeout,
+  TurnTimeoutError,
 } from "./claude-handler";
 import {
   destroyThreadWorkspace,
@@ -290,6 +292,75 @@ describe("ClaudeHandler", () => {
       expect(sleepSpy).toHaveBeenNthCalledWith(1, 10);
       expect(sleepSpy).toHaveBeenNthCalledWith(2, 20);
     });
+  });
+});
+
+describe("withTurnIdleTimeout", () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  const drain = (
+    iterable: AsyncIterable<any>,
+    timeoutMs: number,
+    onTimeout: () => void,
+  ): Promise<any[]> =>
+    (async () => {
+      const received: any[] = [];
+      for await (const message of withTurnIdleTimeout(
+        iterable,
+        timeoutMs,
+        onTimeout,
+      )) {
+        received.push(message);
+      }
+      return received;
+    })();
+
+  it("passes messages through and completes", async () => {
+    async function* twoMessages(): AsyncGenerator<any> {
+      yield { type: "system", subtype: "init" };
+      yield { type: "result", subtype: "success" };
+    }
+
+    const received = await drain(twoMessages(), 60_000, jest.fn());
+
+    expect(received.map(m => m.type)).toEqual(["system", "result"]);
+  });
+
+  it("throws TurnTimeoutError and fires onTimeout when the stream goes idle", async () => {
+    const onTimeout = jest.fn();
+    async function* neverYields(): AsyncGenerator<any> {
+      await new Promise(() => {}); // hangs forever
+    }
+
+    const consumption = drain(neverYields(), 60_000, onTimeout);
+    // Attach the rejection handler before advancing timers.
+    const assertion = expect(consumption).rejects.toThrow(TurnTimeoutError);
+    await jest.advanceTimersByTimeAsync(60_000);
+
+    await assertion;
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets the timer on each message", async () => {
+    const onTimeout = jest.fn();
+    let releaseSecond!: () => void;
+    async function* slowSecond(): AsyncGenerator<any> {
+      yield { type: "assistant" };
+      await new Promise<void>(resolve => {
+        releaseSecond = resolve;
+      });
+      yield { type: "result" };
+    }
+
+    const consumption = drain(slowSecond(), 60_000, onTimeout);
+    await jest.advanceTimersByTimeAsync(0); // first message flows
+    await jest.advanceTimersByTimeAsync(59_000); // gap stays under the limit
+    releaseSecond();
+
+    const received = await consumption;
+    expect(received.map(m => m.type)).toEqual(["assistant", "result"]);
+    expect(onTimeout).not.toHaveBeenCalled();
   });
 });
 

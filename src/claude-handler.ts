@@ -18,6 +18,66 @@ import { OpusHealthMonitor } from "./opus-health";
 /** Default max age for inactive session cleanup (16 hours). */
 export const DEFAULT_SESSION_MAX_AGE_MS = 16 * 60 * 60 * 1000;
 
+/**
+ * Max time the SDK stream may go without yielding any message before the
+ * query is aborted as hung (default 15 minutes, TURN_IDLE_TIMEOUT_MS env var
+ * overrides). Must stay above MCP_TOOL_TIMEOUT (10 min in CLAUDE_ENV) so a
+ * legitimately slow tool call never trips it — the target is a hung API
+ * stream or stuck tool process, which otherwise blocks the query forever.
+ * Total runtime stays bounded by maxTurns/maxBudgetUsd.
+ */
+export const TURN_IDLE_TIMEOUT_MS =
+  Number(process.env.TURN_IDLE_TIMEOUT_MS) || 15 * 60 * 1000;
+
+/** Thrown when a query is aborted for going idle past TURN_IDLE_TIMEOUT_MS. */
+export class TurnTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`No stream progress for ${Math.round(timeoutMs / 60000)} minutes`);
+    this.name = "TurnTimeoutError";
+  }
+}
+
+/**
+ * Wrap an async iterable so every pull must resolve within `timeoutMs`;
+ * on timeout `onTimeout` fires (abort the query there) and a TurnTimeoutError
+ * is thrown. The timer only runs while waiting on the SDK — time the caller
+ * spends processing a yielded message is not counted.
+ */
+export async function* withTurnIdleTimeout(
+  iterable: AsyncIterable<SDKMessage>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): AsyncGenerator<SDKMessage, void, unknown> {
+  const iterator = iterable[Symbol.asyncIterator]();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    while (true) {
+      const result = await new Promise<IteratorResult<SDKMessage>>(
+        (resolve, reject) => {
+          timer = setTimeout(() => {
+            onTimeout();
+            reject(new TurnTimeoutError(timeoutMs));
+          }, timeoutMs);
+          iterator.next().then(
+            r => {
+              clearTimeout(timer);
+              resolve(r);
+            },
+            e => {
+              clearTimeout(timer);
+              reject(e);
+            },
+          );
+        },
+      );
+      if (result.done) return;
+      yield result.value;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const ALLOWED_ENV_VARS = new Set([
   "PATH",
   "HOME",
@@ -221,6 +281,9 @@ export class ClaudeHandler {
         return;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
+        // A hung-query abort is terminal — retrying would just wait out the
+        // full idle timeout again.
+        if (error instanceof TurnTimeoutError) throw error;
         if (globalAttempt === this.retryOptions.maxRetries) throw error;
 
         // Clear session ID to force fresh session on retry
@@ -468,6 +531,24 @@ export class ClaudeHandler {
       options.resume = session.sessionId;
     }
 
+    // The SDK query gets its own controller so the idle watchdog below can
+    // abort a hung query without marking the caller's controller as
+    // user-cancelled. Caller aborts (newer thread message, stop) forward.
+    const queryController = new AbortController();
+    if (abortController) {
+      if (abortController.signal.aborted) {
+        queryController.abort();
+      } else {
+        abortController.signal.addEventListener(
+          "abort",
+          () => queryController.abort(),
+          {
+            once: true,
+          },
+        );
+      }
+    }
+
     // Create a generator with simple retry logic
     const generator = await this.simpleRetry(async () => {
       // Use eval to perform dynamic import without TypeScript transforming it
@@ -480,7 +561,7 @@ export class ClaudeHandler {
 
       return claudeQuery({
         prompt,
-        abortController: abortController || new AbortController(),
+        abortController: queryController,
         options,
       });
     }, onRetry);
@@ -490,9 +571,22 @@ export class ClaudeHandler {
     // The SDK raises after yielding that result; we swallow that raise so the
     // stream ends cleanly and the caller (message-processor) can reply with
     // the partial content plus the limit note from processResultMessage.
+    // Abort the query if the SDK yields nothing for TURN_IDLE_TIMEOUT_MS.
+    const timedGenerator = withTurnIdleTimeout(
+      generator,
+      TURN_IDLE_TIMEOUT_MS,
+      () => {
+        this.logger.error("Turn idle timeout fired; aborting hung query", {
+          timeoutMs: TURN_IDLE_TIMEOUT_MS,
+          sessionId: session?.sessionId,
+        });
+        queryController.abort();
+      },
+    );
+
     let hitTerminalLimit = false;
     try {
-      for await (const message of generator) {
+      for await (const message of timedGenerator) {
         // Watch for capacity signals so ops is alerted when Opus is falling
         // back to Sonnet. Only meaningful when this request actually targeted
         // Opus as its primary model.
