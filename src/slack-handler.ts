@@ -1080,8 +1080,10 @@ export class SlackHandler {
       return [];
     }
 
+    const session = await this.getOrCreateSession(event);
     const processedFiles = await this.fileHandler.downloadAndProcessFiles(
       event.files,
+      session.workingDirectory,
     );
 
     if (processedFiles.length > 0) {

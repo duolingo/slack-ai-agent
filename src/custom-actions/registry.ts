@@ -57,6 +57,22 @@ export class CustomActionRegistry {
   // MCP Server creation (per-request)
   // ------------------------------------------------------------------
 
+  private isActionEnabled = (action: CustomAction<any>): boolean => {
+    if (!action.enabled) {
+      return true;
+    }
+
+    try {
+      return action.enabled();
+    } catch (error) {
+      this.logger.warn("Failed to check custom action availability", {
+        name: action.name,
+        error,
+      });
+      return false;
+    }
+  };
+
   /**
    * Build an SDK MCP server config that can be merged into the
    * `options.mcpServers` map passed to `query()`.
@@ -68,17 +84,17 @@ export class CustomActionRegistry {
     slackContext: ActionSlackContext,
     filter?: (action: CustomAction<any>) => boolean,
   ): Promise<Record<string, any>> {
-    // Dynamic ESM import (same pattern as claude-handler.ts)
-    const { createSdkMcpServer, tool } = await eval(
-      'import("@anthropic-ai/claude-agent-sdk")',
-    );
-
     const actions = [...this.actions.values()].filter(
-      action => !filter || filter(action),
+      action => this.isActionEnabled(action) && (!filter || filter(action)),
     );
     if (actions.length === 0) {
       return {};
     }
+
+    // Dynamic ESM import (same pattern as claude-handler.ts)
+    const { createSdkMcpServer, tool } = await eval(
+      'import("@anthropic-ai/claude-agent-sdk")',
+    );
 
     const byServer = new Map<string, CustomAction<any>[]>();
     for (const action of actions) {
@@ -608,7 +624,8 @@ export class CustomActionRegistry {
   // ------------------------------------------------------------------
 
   /** Periodically purge sessions older than 7 days to prevent the
-   *  persisted file from growing unbounded. */
+   *  persisted file from growing unbounded, and start any background
+   *  tasks owned by registered actions. */
   startSessionCleanup(): void {
     const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
     setInterval(() => {
@@ -619,6 +636,9 @@ export class CustomActionRegistry {
         }
       }
     }, 60 * 1000);
+    for (const action of this.actions.values()) {
+      action.startBackgroundTasks?.();
+    }
   }
 
   // ------------------------------------------------------------------

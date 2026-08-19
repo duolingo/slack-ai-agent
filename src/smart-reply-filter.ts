@@ -90,7 +90,7 @@ const runClassifierQuery = async (
       model: HAIKU_MODEL,
       verbose: false,
       logLevel: "error",
-      env: buildSanitizedEnv(),
+      env: buildSanitizedEnv(config.baseDirectory),
       // No tools, no MCP, no skills — this is a pure text classification.
       allowedTools: [],
       settingSources: [],

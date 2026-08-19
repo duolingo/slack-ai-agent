@@ -27,7 +27,6 @@ jest.mock("./validation-agent", () => ({
   loadSubagentDefinitions: jest.fn(() => ({})),
 }));
 
-import fs from "fs";
 import os from "os";
 import path from "path";
 import {
@@ -36,12 +35,7 @@ import {
   shouldInjectActions,
   buildSanitizedEnv,
 } from "./claude-handler";
-import {
-  destroyThreadWorkspace,
-  buildSandboxFilesystem,
-  SANDBOX_FILESYSTEM,
-  SANDBOX_NETWORK,
-} from "./config";
+import { destroyThreadWorkspace, SANDBOX_NETWORK } from "./config";
 
 function createHandler(retryOverrides?: {
   maxRetries?: number;
@@ -334,6 +328,7 @@ describe("shouldInjectActions", () => {
 
 describe("buildSanitizedEnv", () => {
   const originalEnv = process.env;
+  const workspace = "/tmp/slack-ai-agent/workspaces/env-test";
 
   beforeEach(() => {
     process.env = {
@@ -369,12 +364,16 @@ describe("buildSanitizedEnv", () => {
       "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
       "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
       "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+      "CLOUDSDK_CONFIG",
       "ENABLE_CLAUDEAI_MCP_SERVERS",
       "HOME",
       "MAX_MCP_OUTPUT_TOKENS",
       "MCP_TOOL_TIMEOUT",
       "PATH",
     ]);
+    expect(env.CLOUDSDK_CONFIG).toBe(
+      path.join(os.homedir(), ".config", "gcloud"),
+    );
   });
 
   it("excludes all other secrets", () => {
@@ -426,66 +425,17 @@ describe("buildSanitizedEnv", () => {
     process.env.ENABLE_CLAUDEAI_MCP_SERVERS = "true";
     expect(buildSanitizedEnv().ENABLE_CLAUDEAI_MCP_SERVERS).toBe("false");
   });
-});
 
-describe("SANDBOX_FILESYSTEM", () => {
-  // Regression guard: the `bq` CLI refreshes its OAuth token cache into
-  // ~/.config/gcloud on every call, so the dir must be writable, not just
-  // readable, or bq dies with a read-only filesystem error.
-  it("lets bq both read and write its gcloud token cache in place", () => {
-    expect(SANDBOX_FILESYSTEM.allowRead).toContain("~/.config/gcloud");
-    expect(SANDBOX_FILESYSTEM.allowWrite).toContain("~/.config/gcloud");
-  });
-
-  it("keeps the rest of $HOME unreadable so repo secrets stay hidden", () => {
-    expect(SANDBOX_FILESYSTEM.denyRead).toContain("~/");
-    // The sandbox cwd stays writable for the agent's own scratch files.
-    expect(SANDBOX_FILESYSTEM.allowWrite).toContain("/tmp/slack-ai-agent");
-  });
-
-  it("scopes bash writes to the thread workspace cwd", () => {
-    const threadWorkspace = "/tmp/slack-ai-agent/workspaces/U1-C2-1.1";
-    const rules = buildSandboxFilesystem(threadWorkspace);
-    expect(rules.allowWrite).toEqual([threadWorkspace, "~/.config/gcloud"]);
-    expect(rules.denyRead).toEqual(SANDBOX_FILESYSTEM.denyRead);
-  });
-
-  // The CLI persists oversized tool outputs under
-  // ~/.claude/projects/<slugified-cwd>/ and tells the agent to read them
-  // back from there. The slug is per thread workspace, so other threads'
-  // session artifacts stay hidden behind the $HOME denyRead.
-  it("lets the agent read back its own persisted oversized tool outputs", () => {
-    const rules = buildSandboxFilesystem(
-      "/tmp/slack-ai-agent/workspaces/U1-C2-1.1",
-    );
-    expect(rules.allowRead).toEqual([
-      ".",
-      "~/.config/gcloud",
-      "~/.claude/projects/-tmp-slack-ai-agent-workspaces-U1-C2-1-1",
-    ]);
-  });
-
-  // The CLI slugs its *resolved* cwd, so when the workspace path contains a
-  // symlink (macOS /tmp → /private/tmp) the persisted outputs land under the
-  // physical path's slug, which must be readable too.
-  it("also lets the agent read the project dir of a symlink-resolved cwd", () => {
-    const target = fs.mkdtempSync(path.join(os.tmpdir(), "ws-target-"));
-    const link = `${target}-link`;
-    fs.symlinkSync(target, link);
-    try {
-      const rules = buildSandboxFilesystem(link);
-      expect(rules.allowRead).toContain(
-        `~/.claude/projects/${link.replace(/[^a-zA-Z0-9]/g, "-")}`,
-      );
-      expect(rules.allowRead).toContain(
-        `~/.claude/projects/${fs
-          .realpathSync(link)
-          .replace(/[^a-zA-Z0-9]/g, "-")}`,
-      );
-    } finally {
-      fs.rmSync(link, { force: true });
-      fs.rmSync(target, { recursive: true, force: true });
-    }
+  it("keeps HOME for MCP auth and Claude state in the cwd", () => {
+    process.env.CLOUDSDK_CONFIG = "/tmp/gcloud-test";
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = "/tmp/google-test.json";
+    const env = buildSanitizedEnv(workspace);
+    expect(env.HOME).toBe("/home/user");
+    expect(env.CLAUDE_CONFIG_DIR).toBe(`${workspace}/.claude-state`);
+    expect(env.CLAUDE_CODE_TMPDIR).toBe(`${workspace}/.tmp`);
+    expect(env.TMPDIR).toBe(`${workspace}/.tmp`);
+    expect(env.CLOUDSDK_CONFIG).toBe("/tmp/gcloud-test");
+    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("/tmp/google-test.json");
   });
 });
 

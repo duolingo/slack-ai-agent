@@ -1,4 +1,5 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import path from "path";
 import { ConversationSession, SlackContext } from "./types";
 import { Logger } from "./logger";
 import { bindUserToMcpServers, McpManager } from "./mcp-manager";
@@ -7,6 +8,7 @@ import {
   provisionThreadWorkspace,
   destroyThreadWorkspace,
   buildSandboxFilesystem,
+  getCloudSdkConfig,
   SANDBOX_NETWORK,
 } from "./config";
 import { UserUtils } from "./user-utils";
@@ -31,9 +33,6 @@ const ALLOWED_ENV_VARS = new Set([
   "AWS_SESSION_TOKEN",
   "AWS_REGION",
   "AWS_PROFILE",
-  // GCP/BQ CLI auth — bq reads creds from ~/.config/gcloud/ by default.
-  // CLOUDSDK_CONFIG overrides the config dir; GOOGLE_APPLICATION_CREDENTIALS
-  // points to a service account key file.
   "CLOUDSDK_CONFIG",
   "GOOGLE_APPLICATION_CREDENTIALS",
 ]);
@@ -66,11 +65,12 @@ const CLAUDE_ENV = {
 /**
  * Build a sanitized env for the Claude subprocess.
  *
- * Only PATH, HOME, and Anthropic auth credentials are passed. MCP server tokens
- * are no longer needed in the subprocess env because mcp-servers.json is
- * pre-resolved with literal values by scripts/resolve-mcp-config.sh.
+ * HOME lets MCP header helpers resolve their read-only credential file. Claude
+ * state and temp files stay in the cwd.
  */
-export const buildSanitizedEnv = (): Record<string, string | undefined> => {
+export const buildSanitizedEnv = (
+  workingDirectory?: string,
+): Record<string, string | undefined> => {
   const sanitized: Record<string, string | undefined> = {};
   for (const key of ALLOWED_ENV_VARS) {
     if (key in process.env) {
@@ -79,6 +79,13 @@ export const buildSanitizedEnv = (): Record<string, string | undefined> => {
   }
   // Applied last so a misconfigured runner can't bypass the invariants.
   Object.assign(sanitized, CLAUDE_ENV);
+  sanitized.CLOUDSDK_CONFIG = getCloudSdkConfig();
+  if (workingDirectory) {
+    sanitized.CLAUDE_CONFIG_DIR = path.join(workingDirectory, ".claude-state");
+    const tempDirectory = path.join(workingDirectory, ".tmp");
+    sanitized.CLAUDE_CODE_TMPDIR = tempDirectory;
+    sanitized.TMPDIR = tempDirectory;
+  }
   return sanitized;
 };
 
@@ -278,12 +285,11 @@ export class ClaudeHandler {
       verbose: false,
       logLevel: "error", // Only log errors, not debug/info
       // Sanitize the subprocess environment so Claude sessions cannot
-      // discover application secrets. MCP tokens are pre-resolved into
-      // mcp-servers.json by scripts/resolve-mcp-config.sh and don't need
-      // to be in the subprocess env.
-      env: buildSanitizedEnv(),
-      // Enable skill discovery from .claude/skills/ in the thread workspace
-      settingSources: ["project", "user"],
+      // discover application secrets. Vetted MCP helpers read their rotating
+      // credentials from the one read-only file allowed by the sandbox.
+      env: buildSanitizedEnv(cwd),
+      // Load only the curated project skills copied into the workspace.
+      settingSources: ["project"],
       // Maximum number of agentic turns before stopping. A Data AI job polled
       // every 5s for 25 minutes is ~300 turns on its own.
       maxTurns: 400,
@@ -291,13 +297,10 @@ export class ClaudeHandler {
       // top-level loop and all subagent API calls, and the query stops with
       // an error_max_budget_usd result when it's hit.
       maxBudgetUsd: 25,
-      // Sandbox Bash commands so they cannot read the repo dir (which
-      // contains mcp-servers.json with resolved secrets) or other
-      // sensitive paths under $HOME. Read/Edit/Write tools are NOT
-      // sandboxed by this — they go through the permission system — but
-      // the allowedTools list already restricts those.
+      // Bash is sandboxed separately from cwd-scoped file-tool permissions.
       sandbox: {
         enabled: true,
+        failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
         allowUnsandboxedCommands: false,
         filesystem: buildSandboxFilesystem(cwd),
@@ -444,15 +447,25 @@ export class ClaudeHandler {
       role,
     });
 
-    options.disallowedTools = this.mcpManager.getDisallowedTools();
+    const disallowedTools = [
+      ...this.mcpManager.getDisallowedTools(),
+      "Edit(./.claude/**)",
+      "Edit(./.claude-state/**)",
+    ];
+    options.disallowedTools = disallowedTools;
+    // AgentDefinition.tools accepts names, while path rules stay on allowedTools.
+    const subagentTools = [
+      ...new Set(allowedTools.map(tool => tool.split("(")[0])),
+    ];
 
     // Register sub-agents so the main agent can delegate specialised tasks
     // via the Task tool. Sub-agents run in separate contexts — their tool
     // chatter never leaks into the final response.
-    // Pass the same allowedTools so sub-agents have identical permissions.
+    // Pass the same tool rules so sub-agents have identical permissions.
     options.agents = {
       ...loadSubagentDefinitions(
-        allowedTools.length > 0 ? allowedTools : undefined,
+        subagentTools.length > 0 ? subagentTools : undefined,
+        disallowedTools,
       ),
       // The SDK's built-in general-purpose agent is what the model spawns
       // automatically for ad-hoc delegation, and it has no turn limit by
@@ -461,6 +474,7 @@ export class ClaudeHandler {
       // subagents (config/subagents/*.yaml) are left untouched.
       "general-purpose": {
         maxTurns: 100,
+        disallowedTools,
       },
     };
 

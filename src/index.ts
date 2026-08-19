@@ -7,7 +7,6 @@ import { SlackHandler } from "./slack-handler";
 import { McpManager } from "./mcp-manager";
 import { ReactionManager } from "./reaction-manager";
 import { CustomActionRegistry, loadCustomActions } from "./custom-actions";
-import { startActiveWorkflowCleanup } from "../config/custom-actions/create-pr-via-temporal";
 import { Logger } from "./logger";
 import { UserUtils } from "./user-utils";
 import { initTracking } from "./tracking";
@@ -44,7 +43,6 @@ async function start() {
     }
     registry.setupButtonHandlers();
     registry.startSessionCleanup();
-    startActiveWorkflowCleanup();
 
     const opusHealthMonitor = new OpusHealthMonitor({
       notify: buildSlackNotify(app, config.opsAlertChannelId),

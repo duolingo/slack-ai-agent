@@ -60,8 +60,8 @@ export interface CustomAction<TParams> {
    */
   requiresApproval?: boolean;
   /**
-   * When set, the loader skips this action if the callback returns false
-   * (e.g. when required credentials are unset).
+   * When set, the action is included in each request only if the callback
+   * returns true (e.g. when required credentials are available).
    */
   enabled?: () => boolean;
   /**
@@ -98,6 +98,10 @@ export interface CustomAction<TParams> {
    *  registry calls this for each registered action right after it wires
    *  up the generic approve/cancel handlers. */
   setupActionHandlers?(app: App): void;
+  /** Optional. Start background tasks owned by the action (e.g. periodic
+   *  cleanup of its persisted state). The registry calls this once at
+   *  startup from startSessionCleanup. */
+  startBackgroundTasks?(): void;
   /** Optional list of Slack emoji shortcodes (e.g. [":yolo-jira:", ":yolo-pr:"]).
    *  When any of them is present in the user's message text the confirmation
    *  dialog is skipped and the action executes immediately. */

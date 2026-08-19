@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
+import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { OPUS_MODEL } from "./request-mode";
 
@@ -15,18 +17,25 @@ function getRequiredEnv(key: string): string {
 
 // The Claude Agent SDK's working directory lives under /tmp so the agent
 // never reads from or writes to the application directory.  Each Slack
-// thread gets its own subdirectory under workspaces/ with copies of
-// .claude/ and data/ physically inside the sandbox (symlinks get resolved
-// to the real path which is outside the sandbox, causing security blocks
-// on grep/Read/Glob).
+// thread gets its own subdirectory under workspaces/ with curated skills and
+// data physically inside the sandbox.
 export const SANDBOX_ROOT = "/tmp/slack-ai-agent";
 const WORKSPACES_DIR = path.join(SANDBOX_ROOT, "workspaces");
+
+// Linux sandbox bridge sockets have a short path limit, so workspace names
+// must leave enough room for socket filenames under the workspace temp dir.
+const threadWorkspace = (sessionKey: string): string =>
+  path.join(
+    WORKSPACES_DIR,
+    crypto.createHash("sha256").update(sessionKey).digest("hex").slice(0, 16),
+  );
 
 /** Replace dest with a fresh copy of source. Copies to a temp dir first
  *  so the sandbox keeps its old copy if the source read fails. */
 function copyDirIntoSandbox(source: string, dest: string): void {
   if (!fs.existsSync(source)) return;
   const tmp = `${dest}.tmp`;
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.cpSync(source, tmp, { recursive: true });
   fs.rmSync(dest, { recursive: true, force: true });
@@ -62,9 +71,16 @@ function ensureSandboxRoot(): string {
 
 /** Create or refresh the per-thread agent workspace for a Slack session. */
 export function provisionThreadWorkspace(sessionKey: string): string {
-  const workspace = path.join(WORKSPACES_DIR, sessionKey);
+  const workspace = threadWorkspace(sessionKey);
   fs.mkdirSync(workspace, { recursive: true });
-  copyDirIntoSandbox(path.resolve(".claude"), path.join(workspace, ".claude"));
+  fs.mkdirSync(path.join(workspace, ".tmp"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, ".claude-state"), { recursive: true });
+  const claudeDir = path.join(workspace, ".claude");
+  fs.rmSync(claudeDir, { recursive: true, force: true });
+  copyDirIntoSandbox(
+    path.resolve(".claude/skills"),
+    path.join(claudeDir, "skills"),
+  );
   try {
     copyDirIntoSandbox(path.resolve("data"), path.join(workspace, "data"));
   } catch {
@@ -75,62 +91,47 @@ export function provisionThreadWorkspace(sessionKey: string): string {
 
 /** Remove a thread workspace when its session is evicted. */
 export function destroyThreadWorkspace(sessionKey: string): void {
-  fs.rmSync(path.join(WORKSPACES_DIR, sessionKey), {
+  fs.rmSync(threadWorkspace(sessionKey), {
     recursive: true,
     force: true,
   });
 }
 
-/**
- * Filesystem rules for the Bash sandbox.
- *
- * Denies reading $HOME (where the repo and resolved mcp-servers.json secrets
- * live) and carves out ~/.config/gcloud for bq CLI auth. That dir must be
- * both readable and writable because bq rewrites its OAuth token cache on
- * every access-token refresh.
- */
-const SANDBOX_FILESYSTEM_RULES = {
-  denyRead: ["~/"],
-  allowRead: [".", "~/.config/gcloud"],
-} as const;
-
-/**
- * Per-cwd Claude project dirs (~/.claude/projects/<slug>). When a tool result
- * exceeds the output token limit, the Claude CLI persists it under
- * <project>/<session>/tool-results/ and points the agent at that path, so
- * the dir must be readable despite the $HOME denyRead. The slug mirrors the
- * CLI's own project-dir naming (every non-alphanumeric character becomes
- * "-"), applied to both the given cwd and its realpath — the CLI slugs its
- * resolved cwd, so a symlinked workspace (macOS /tmp → /private/tmp)
- * persists under the physical slug. Either way the carve-out stays scoped
- * to this thread workspace's sessions — other threads' project dirs stay
- * hidden.
- */
-const claudeProjectDirs = (workingDirectory: string): string[] => {
-  const dirs = new Set([workingDirectory]);
-  try {
-    dirs.add(fs.realpathSync(workingDirectory));
-  } catch {
-    // Workspace not provisioned yet (unit tests); the logical path is the
-    // best guess.
-  }
-  return [...dirs].map(
-    dir => `~/.claude/projects/${dir.replace(/[^a-zA-Z0-9]/g, "-")}`,
+const resolvedPaths = (...paths: Array<string | undefined>): string[] =>
+  paths.flatMap(value =>
+    value
+      ? [fs.existsSync(value) ? fs.realpathSync(value) : path.resolve(value)]
+      : [],
   );
+
+export const getCloudSdkConfig = (): string =>
+  process.env.CLOUDSDK_CONFIG || path.join(os.homedir(), ".config", "gcloud");
+
+const getMcpJwtHeadersFile = (): string =>
+  path.join(os.homedir(), ".slack-ai-agent", "mcp-jwt-headers.json");
+
+/** Bash can access the cwd and the explicitly configured auth paths. */
+export const buildSandboxFilesystem = (workingDirectory: string) => {
+  return {
+    denyRead: resolvedPaths(
+      os.homedir(),
+      path.resolve("."),
+      path.dirname(SANDBOX_ROOT),
+      os.tmpdir(),
+    ),
+    allowRead: resolvedPaths(
+      workingDirectory,
+      getCloudSdkConfig(),
+      process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      getMcpJwtHeadersFile(),
+    ),
+    allowWrite: resolvedPaths(workingDirectory, getCloudSdkConfig()),
+    denyWrite: resolvedPaths(
+      path.join(workingDirectory, ".claude"),
+      path.join(workingDirectory, ".claude-state"),
+    ),
+  };
 };
-
-/** Bash sandbox filesystem rules scoped to a thread workspace cwd. */
-export const buildSandboxFilesystem = (workingDirectory: string) => ({
-  denyRead: [...SANDBOX_FILESYSTEM_RULES.denyRead],
-  allowRead: [
-    ...SANDBOX_FILESYSTEM_RULES.allowRead,
-    ...claudeProjectDirs(workingDirectory),
-  ],
-  allowWrite: [workingDirectory, "~/.config/gcloud"],
-});
-
-/** Default rules for tests; allowWrite covers the whole sandbox root. */
-export const SANDBOX_FILESYSTEM = buildSandboxFilesystem(SANDBOX_ROOT);
 
 /**
  * Network rules for the Bash sandbox. Adds the Google Cloud and AWS endpoints

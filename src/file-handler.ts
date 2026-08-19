@@ -1,6 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { Logger } from "./logger";
 import { config } from "./config";
 export interface ProcessedFile {
@@ -10,6 +9,12 @@ export interface ProcessedFile {
   size: number;
 }
 
+export const getUploadPath = (destinationDir: string, fileName?: string) =>
+  path.join(
+    destinationDir,
+    `slack-file-${Date.now()}-${path.basename(fileName || "upload")}`,
+  );
+
 export class FileHandler {
   private logger = new Logger("FileHandler");
   private slackApp: any;
@@ -18,12 +23,16 @@ export class FileHandler {
     this.slackApp = slackApp;
   }
 
-  async downloadAndProcessFiles(files: any[]): Promise<ProcessedFile[]> {
+  /** Download Slack files into the conversation workspace. */
+  async downloadAndProcessFiles(
+    files: any[],
+    destinationDir: string,
+  ): Promise<ProcessedFile[]> {
     const processedFiles: ProcessedFile[] = [];
 
     for (const file of files) {
       try {
-        const processed = await this.downloadFile(file);
+        const processed = await this.downloadFile(file, destinationDir);
         if (processed) {
           processedFiles.push(processed);
         } else {
@@ -46,7 +55,10 @@ export class FileHandler {
     return processedFiles;
   }
 
-  private async downloadFile(file: any): Promise<ProcessedFile | null> {
+  private async downloadFile(
+    file: any,
+    destinationDir: string,
+  ): Promise<ProcessedFile | null> {
     // Check file size limit (50MB)
     if (file.size > 50 * 1024 * 1024) {
       this.logger.warn("File too large, skipping", {
@@ -119,11 +131,7 @@ export class FileHandler {
         });
         throw new Error("Slack Web API client required for file downloads");
       }
-      const tempDir = os.tmpdir();
-      const tempPath = path.join(
-        tempDir,
-        `slack-file-${Date.now()}-${file.name}`,
-      );
+      const tempPath = getUploadPath(destinationDir, file.name);
 
       fs.writeFileSync(tempPath, buffer);
 

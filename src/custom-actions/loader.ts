@@ -77,11 +77,6 @@ export const loadCustomActions = async (): Promise<CustomAction<any>[]> => {
         continue;
       }
 
-      if (action.enabled && !action.enabled()) {
-        logger.info(`Skipping disabled action: ${action.name} (from ${file})`);
-        continue;
-      }
-
       actions.push(action);
       logger.info(`Loaded custom action: ${action.name} (from ${file})`);
     } catch (error) {

@@ -31,9 +31,11 @@ interface SubagentDefinition {
  *
  * @param allowedTools - Optional tool allowlist to apply to all sub-agents.
  *   Ensures sub-agents have the same permissions as the parent agent.
+ * @param disallowedTools - Optional tool denylist to apply to all sub-agents.
  */
 export function loadSubagentDefinitions(
   allowedTools?: string[],
+  disallowedTools?: string[],
 ): Record<string, unknown> {
   if (!fs.existsSync(SUBAGENTS_DIR)) return {};
 
@@ -67,6 +69,9 @@ export function loadSubagentDefinitions(
 
       if (allowedTools) {
         agent.tools = allowedTools;
+      }
+      if (disallowedTools) {
+        agent.disallowedTools = disallowedTools;
       }
 
       agents[def.name] = agent;

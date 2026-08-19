@@ -108,6 +108,50 @@ describe("CustomActionRegistry reaction lifecycle", () => {
     registry = new CustomActionRegistry(app, reactionManager);
   });
 
+  it("checks enabled actions for each request", async () => {
+    const enabled = jest.fn(() => false);
+    registry.register(makeAction({ enabled }));
+
+    expect(await registry.createMcpServerConfig(makeCtx())).toEqual({});
+    expect(await registry.createMcpServerConfig(makeCtx())).toEqual({});
+    expect(enabled).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues checking actions when one enabled callback throws", async () => {
+    const available = jest.fn(() => true);
+    registry.register(
+      makeAction({
+        name: "broken-action",
+        enabled: () => {
+          throw new Error("configuration unavailable");
+        },
+      }),
+    );
+    registry.register(
+      makeAction({ name: "available-action", enabled: available }),
+    );
+
+    await expect(
+      registry.createMcpServerConfig(makeCtx(), () => false),
+    ).resolves.toEqual({});
+    expect(available).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts registered actions' background tasks on startSessionCleanup", () => {
+    jest.useFakeTimers();
+    try {
+      const startBackgroundTasks = jest.fn();
+      registry.register(makeAction({ startBackgroundTasks }));
+      registry.register(makeAction({ name: "no-tasks-action" }));
+
+      registry.startSessionCleanup();
+
+      expect(startBackgroundTasks).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it("sets waiting-on-human on the original message when a confirmation dialog is posted", async () => {
     registry.register(makeAction());
 
