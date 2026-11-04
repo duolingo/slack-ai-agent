@@ -42,6 +42,7 @@ logs/
 
 # Misc file types
 README_INTERNAL.md
+PLAYBOOK.md
 blog-post-*.md
 *.csv
 scripts/*
