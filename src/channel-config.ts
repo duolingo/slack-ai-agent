@@ -57,6 +57,13 @@ interface ChannelConfig {
   smartReply?: SmartReplyConfig;
 }
 
+/** Defaults used when config/channels.yaml is absent or omits a section. */
+const defaultChannelConfig = (): ChannelConfig => ({
+  channelSettings: [],
+  ephemeralChannelConfig: {},
+  dmNotificationConfig: {},
+});
+
 export class ChannelConfigManager {
   private logger = new Logger("ChannelConfigManager");
   private configCache: Map<string, { data: any; fetchedAt: number }> =
@@ -121,11 +128,24 @@ export class ChannelConfigManager {
       return cached.data as ChannelConfig;
     }
 
-    const configContent = fs.readFileSync(
-      path.resolve("config/channels.yaml"),
-      "utf-8",
-    );
-    const loadedConfig = yaml.load(configContent) as ChannelConfig;
+    // config/channels.yaml is optional (see README), so a missing file means
+    // "no channel-specific settings" rather than an error on every message.
+    let configContent: string;
+    try {
+      configContent = fs.readFileSync(
+        path.resolve("config/channels.yaml"),
+        "utf-8",
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.logger.debug("config/channels.yaml not found, using defaults");
+      configContent = "";
+    }
+    const loadedConfig: ChannelConfig = {
+      ...defaultChannelConfig(),
+      ...((yaml.load(configContent) as Partial<ChannelConfig> | undefined) ??
+        {}),
+    };
 
     this.configCache.set(cacheKey, { data: loadedConfig, fetchedAt: now });
     this.logger.debug("Loaded channel config from local file");

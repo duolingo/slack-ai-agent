@@ -30,11 +30,13 @@ jest.mock("js-yaml", () => ({
   }),
 }));
 
+import { readFileSync } from "fs";
 import { load } from "js-yaml";
 import { ChannelConfigManager } from "./channel-config";
 import { SlackChannelType } from "./types";
 
 const mockedYamlLoad = load as jest.Mock;
+const mockedReadFileSync = readFileSync as jest.Mock;
 
 describe("ChannelConfigManager", () => {
   let manager: ChannelConfigManager;
@@ -279,6 +281,39 @@ describe("ChannelConfigManager", () => {
       expect(
         await manager.isSmartReplyEligibleChannelName("private-team", "group"),
       ).toBe(true);
+    });
+  });
+
+  describe("optional channels.yaml", () => {
+    const fsError = (code: string) =>
+      Object.assign(new Error(`${code}: config/channels.yaml`), { code });
+
+    it("uses defaults when config/channels.yaml does not exist", async () => {
+      mockedReadFileSync.mockImplementationOnce(() => {
+        throw fsError("ENOENT");
+      });
+      mockedYamlLoad.mockReturnValueOnce(undefined);
+
+      expect(await manager.getFullContentLoggingAllowlist()).toEqual(new Set());
+      expect(await manager.shouldUseEphemeralMessaging("C123")).toBe(false);
+      expect(await manager.shouldSendDM("C123", "U123")).toBe(false);
+    });
+
+    it("fills in sections that config/channels.yaml leaves out", async () => {
+      mockedYamlLoad.mockReturnValueOnce({ channelSettings: [] });
+
+      expect(await manager.shouldUseEphemeralMessaging("C123")).toBe(false);
+      expect(await manager.getEphemeralTargetUsers("C123")).toEqual([]);
+    });
+
+    it("still reports other errors reading config/channels.yaml", async () => {
+      mockedReadFileSync.mockImplementationOnce(() => {
+        throw fsError("EACCES");
+      });
+
+      await expect(manager.getFullContentLoggingAllowlist()).rejects.toThrow(
+        "EACCES",
+      );
     });
   });
 });

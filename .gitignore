@@ -21,6 +21,7 @@ mcp-servers.json*
 !package.json
 !package-lock.json
 !tsconfig.json
+!tsconfig.test.json
 
 # Internal config (non-example files)
 config/*
