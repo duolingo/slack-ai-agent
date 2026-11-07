@@ -1,0 +1,8 @@
+schema_version: 1
+owner:
+  team: "5e39920b835c10012017108b3c680000" # Platform - DevX AI
+technology-type: [slack-app]
+lifecycle:
+  state: production
+  context: ""
+compliance: []
