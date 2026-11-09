@@ -1,7 +1,8 @@
 schema_version: 1
 owner:
   team: "5e39920b835c10012017108b3c680000" # Platform - DevX AI
-technology-type: [slack-app, internal-tool]
+technology-type: [slack-app]
+audience: internal
 lifecycle:
   state: production
   context: "Internal tool, not learner-facing."
